@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DevOps - Technical documentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;600&family=JetBrains+Mono:wght@400;500;600&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="chapter-nav" aria-label="Documentation sections">
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="application-stack.html">Application stack</a></li>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="execution.html">Execution</a></li>
+      <li><a href="performance-decisions.html">Performance</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+      <li><a href="tracing-and-observability.html">Tracing</a></li>
+      <li><a href="testing.html">Testing</a></li>
+      <li><a href="security.html">Security</a></li>
+      <li><a href="devops.html" aria-current="page">DevOps</a></li>
+    </ul>
+  </nav>
+
+  <header class="site-header">
+    <h1 class="page-header-title">DevOps</h1>
+    <p class="page-header-desc">Build strategy, deployment safety, migrations, and test image workflow.</p>
+  </header>
+
+  <nav class="toc" aria-label="On this page">
+    <h2>Contents</h2>
+    <ul>
+      <li><a href="#api-worker">API &amp; worker images</a></li>
+      <li><a href="#migrations">Migrations image</a></li>
+      <li><a href="#test-image">Test image</a></li>
+    </ul>
+  </nav>
+
+  <main>
+    <section id="api-worker" class="doc-section">
+      <h2>API &amp; worker images</h2>
+      <p>Both use a multi-stage <code>cargo-chef</code> build. Chef separates dependency compilation from application compilation into distinct Docker layers. The first build is slow - all 200+ dependencies compile from scratch. Every subsequent build skips that layer entirely and only recompiles changed application code. A code change that previously took 10 minutes now takes roughly 10 seconds.</p>
+      <p>The build base is pinned to <code>bookworm</code> to match the runtime image (<code>distroless/cc-debian12</code>). Mismatched glibc versions between build and runtime cause immediate crashes - a binary compiled against a newer glibc simply won't run in the older distroless container. The versions are locked together deliberately.</p>
+      <p><code>SQLX_OFFLINE=true</code> means SQL queries are verified against committed JSON metadata instead of a live database. CI pipelines don't need a running Postgres instance to compile - no flaky pipeline failures from missing database connections.</p>
+      <p>The final images are distroless - no shell, no package manager, no system utilities, roughly 50MB. If a zero-day is exploited, there are no tools available inside the container to do anything with it.</p>
+      <p>API and worker are separate images built from the same source. They scale independently in Kubernetes - more worker pods for processing backlogs, without spinning up unnecessary API servers alongside them.</p>
+    </section>
+
+    <section id="migrations" class="doc-section">
+      <h2>Migrations image</h2>
+      <p>Migrations run in a dedicated ephemeral container, not inside the API startup code. Ten API pods booting simultaneously and all trying to migrate would deadlock each other. The migration container runs first, exits with code 0, and only then does the API rollout begin.</p>
+      <p><code>sqlx-cli</code> is compiled against <code>musl</code> and statically linked, then dropped into a plain Alpine image. No dynamic library dependencies. <code>ca-certificates</code> is installed explicitly - without it, the binary can't verify SSL certificates against managed cloud databases like RDS or Supabase. Only the Postgres feature is compiled in - no MySQL or SQLite drivers bloating the binary. Final image is around 30MB.</p>
+    </section>
+
+    <section id="test-image" class="doc-section">
+      <h2>Test image</h2>
+      <p><code>cargo test --no-run</code> runs during the image build, forcing all test binaries to compile and bake into the Docker layer. When the tester container runs in CI, tests execute immediately - no compilation wait at test time. The final stage retains the full Rust toolchain so the container can be used interactively during development.</p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p><a href="security.html">Previous</a> · <a href="index.html">Home</a> · <a href="application-stack.html">First chapter</a></p>
+  </footer>
+</body>
+</html>

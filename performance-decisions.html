@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Performance decisions - Technical documentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;600&family=JetBrains+Mono:wght@400;500;600&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="chapter-nav" aria-label="Documentation sections">
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="application-stack.html">Application stack</a></li>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="execution.html">Execution</a></li>
+      <li><a href="performance-decisions.html" aria-current="page">Performance</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+      <li><a href="tracing-and-observability.html">Tracing</a></li>
+      <li><a href="testing.html">Testing</a></li>
+      <li><a href="security.html">Security</a></li>
+      <li><a href="devops.html">DevOps</a></li>
+    </ul>
+  </nav>
+
+  <header class="site-header">
+    <h1 class="page-header-title">Performance decisions</h1>
+    <p class="page-header-desc">Indexing, IDs, transactions, timeouts, retries, and failure handling <strong class="perf-tradeoff-head">tradeoffs</strong> and <strong class="perf-gain-head">performance gains</strong>.</p>
+  </header>
+
+  <nav class="toc" aria-label="On this page">
+    <h2>Contents</h2>
+    <ul>
+      <li><a href="#indexing">Indexing</a></li>
+      <li><a href="#uuid">UUIDv4</a></li>
+      <li><a href="#transactions">Transaction flows</a></li>
+      <li><a href="#timeouts">Timeouts</a></li>
+      <li><a href="#failure">Failure handling</a></li>
+      <li><a href="#retry-limits">Retry limits</a></li>
+    </ul>
+  </nav>
+
+  <main class="performance-doc">
+    <section id="indexing" class="doc-section">
+      <h2>Indexing - performance decisions and tradeoffs</h2>
+
+      <h3>Partial indexes over full indexes</h3>
+      <p>The core decision: only index rows that are actively being worked on. <code>idx_stages_polling</code> covers PENDING and PROCESSING rows only. <code>idx_stages_processing_expires_at</code> covers PROCESSING rows with a non-null <code>expires_at</code> only.</p>
+      <p><strong class="perf-tradeoff-head">The tradeoff is deliberate</strong> <span class="perf-tradeoff-detail">- historical COMPLETED rows, which will be the vast majority at scale, are excluded entirely. A standard index on status would grow with every verification ever processed, eventually becoming slow and memory-hungry.</span> <strong class="perf-gain-head">The performance gain</strong> <span class="perf-gain-detail">- partial indexes stay small and fit in RAM regardless of how large the table grows. Worker query time stays flat instead of degrading as data accumulates.</span></p>
+
+      <h3>Ordered index on <code>outbox_events</code></h3>
+      <p><strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail"><code>idx_outbox_polling</code> on <code>created_at ASC</code> lets the relay grab the 50 oldest rows in arrival order without a sort operation.</span> <strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- insert work pays a small overhead to maintain the index</span> <em class="perf-note">(negligible here because the table stays near-empty via deletion).</em></p>
+
+      <h3><code>SKIP LOCKED</code> only scales because the indexes are shaped correctly</h3>
+      <p><code>SKIP LOCKED</code> tells Postgres to skip locked rows and return the next available ones. <strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- with the right index, Postgres finds the next available rows quickly; many worker pods grab disjoint batches without blocking each other.</span> <strong class="perf-tradeoff-head">Tradeoff if mis-shaped</strong> <span class="perf-tradeoff-detail">- without the aligned index, this degrades to row-by-row scan under load.</span></p>
+
+      <div class="callout">
+        <p><strong class="perf-tradeoff-head">Core tradeoff in one sentence.</strong> <span class="perf-tradeoff-detail">Slightly more complex index maintenance and a few extra bytes per write</span> - <strong class="perf-gain-head">in exchange, the performance gain</strong>: <span class="perf-gain-detail">flat query time at any table size and contention-free concurrency across worker pods.</span></p>
+      </div>
+    </section>
+
+    <section id="uuid" class="doc-section">
+      <h2>UUIDv4 - performance and security tradeoffs</h2>
+
+      <h3>What we gained</h3>
+      <p><strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- UUIDs are generated in memory with <code>Uuid::new_v4()</code>; no DB round-trip. Multi-stage transactions do not stall waiting for an ID.</span> Sequential IDs under concurrency <strong class="perf-tradeoff-head">trade off serial contention</strong> <span class="perf-tradeoff-detail">- every insert waits on a locked sequence.</span></p>
+      <p><strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- global uniqueness without coordination across API/worker pods or shards.</span></p>
+      <p><strong class="perf-gain-head">Security gain</strong> <span class="perf-gain-detail">- 122 bits of entropy makes the session ID act as a bearer token; sequential IDs make enumeration trivial.</span></p>
+
+      <h3>What we gave up</h3>
+      <p><strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- 16 bytes per key vs 8, and more B-tree fragmentation than sequential keys because inserts land at random positions (more page splits, higher index maintenance).</span></p>
+
+      <div class="callout">
+        <p><strong class="perf-tradeoff-head">Tradeoff in plain terms.</strong> <span class="perf-tradeoff-detail">Extra disk and mild fragmentation</span> - <strong class="perf-gain-head">performance and ops gains</strong>: <span class="perf-gain-detail">no sequence bottleneck, no cross-pod ID coordination, IDOR resistance, safer sharding.</span> <em class="perf-note">For this workload, the tradeoff skews heavily toward UUIDs.</em></p>
+      </div>
+    </section>
+
+    <section id="transactions" class="doc-section">
+      <h2>Transaction flows - performance decisions and tradeoffs</h2>
+
+      <h3>Session creation - one transaction, bulk insert</h3>
+      <p>The session row and all five stage rows are written in one transaction using <code>unnest</code> (one SQL statement vs five round-trips). <strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- one network round-trip to Postgres regardless of stage count.</span> <strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- slightly larger write transaction; lock time stays small, and <strong class="perf-gain-head">latency drops materially</strong>.</span></p>
+
+      <h3>Stage submission - conditional outbox inside one transaction</h3>
+      <p>The <code>LOCKED → PENDING</code> update, dependency check, and outbox insert share one transaction scope - no second connection, no race between read and insert. <strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- transaction stays open slightly longer for the conditional read.</span> <strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- removes dual-write bugs where the stage updates but the outbox row never lands.</span></p>
+
+      <h3>Outbox relay - row locks held only as long as publish takes</h3>
+      <p>The relay locks up to 50 rows, publishes, deletes only ACKed rows, commits; per-row publish timeout caps lock duration. <strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- slow RabbitMQ extends lock hold time up to the timeout cap.</span> <strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- timeouts prevent unbounded lock hoarding; timed-out rows retry next cycle without blocking the batch indefinitely.</span></p>
+
+      <h3>Stage claim - atomic <code>PENDING → PROCESSING</code> with lease</h3>
+      <p>Single update claims the stage and sets <code>expires_at</code>; zero rows means another worker won. <strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- one round-trip per message.</span> <strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- no check-then-act gap where two workers could claim the same stage.</span></p>
+
+      <h3>Stage completion and successor unlock - same transaction</h3>
+      <p>Completing a stage and enqueueing the successor outbox row are atomic. <strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- slightly longer transaction.</span> <strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- sequencing enforced in the database without orchestrator, scheduler, or inter-stage delay; rollback never queues a successor by mistake.</span></p>
+
+      <h3>Session sweep - batch update, single round-trip</h3>
+      <p>Session sweep uses <code>= ANY($1)</code> over a batch of session IDs. <strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- O(1) statements instead of N round-trips for N sessions; sweep cost stays flat with batch size.</span> <strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- three conditional updates per call (mutually exclusive targets, so no double-writes).</span></p>
+
+      <h3>Lease recovery - CTE-based single-statement update</h3>
+      <p>Expired rows move to <code>PENDING</code> or <code>FAILED</code> in one CTE; lock acquisition and write share one execution. <strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- more complex SQL to maintain.</span> <strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- no window where two recovery workers claim the same expired row.</span></p>
+    </section>
+
+    <section id="timeouts" class="doc-section">
+      <h2>Timeout decisions - performance impact and tradeoffs</h2>
+
+      <h3>Publish timeout (50ms, outbox relay)</h3>
+      <p>While publishing, the relay holds row locks. <strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- 50ms cap releases locks if the broker hangs, so Postgres stays usable.</span> <strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- a slow-but-healthy broker may be skipped and retried on the next poll; DB availability is prioritized over single-attempt publish speed.</span></p>
+
+      <h3>Pool acquire timeout (10 seconds, API)</h3>
+      <p><strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- requests stop waiting before they pile up in RAM and OOM the pod.</span> <strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- some callers see fast 500s instead of eventually succeeding.</span></p>
+
+      <h3>Worker database transaction timeout (10 seconds)</h3>
+      <p>Long transactions hold row locks. <strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- hard ceiling forces nack/requeue and releases the connection.</span> <strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- transient DB slowness may cause extra requeues vs cascading lock contention.</span></p>
+
+      <h3>Shutdown grace period (30 seconds, stage processor)</h3>
+      <p><strong class="perf-tradeoff-head">Tradeoff shaping</strong> <span class="perf-tradeoff-detail">- too short abandons in-flight work; too long slows deploys.</span> <strong class="perf-gain-head">Chosen gain</strong> <span class="perf-gain-detail">- 30s balances clean shutdown against rollout speed.</span></p>
+
+      <p><strong class="perf-tradeoff-head">Core tradeoff across timeouts.</strong> <span class="perf-tradeoff-detail">You pay occasional unnecessary retries.</span> <strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- predictable behavior under degraded infra: fewer hung connections, less memory exhaustion, less lock pile-up.</span></p>
+    </section>
+
+    <section id="failure" class="doc-section">
+      <h2>Failure handling - performance decisions and tradeoffs</h2>
+
+      <ul class="bullets">
+        <li><strong class="perf-tradeoff-head">Retry limits with a hard ceiling - tradeoff:</strong> <span class="perf-tradeoff-detail">some jobs that might eventually succeed are abandoned.</span> <strong class="perf-gain-head">Performance gain:</strong> <span class="perf-gain-detail">no infinite retry loops eating workers and DB connections.</span></li>
+        <li><strong class="perf-tradeoff-head">30-second delay queue - tradeoff:</strong> <span class="perf-tradeoff-detail">slower end-to-end retry.</span> <strong class="perf-gain-head">Performance gain:</strong> <span class="perf-gain-detail">a bad job cannot tight-loop through the worker at full speed.</span></li>
+        <li><strong class="perf-tradeoff-head">Reject to dead-letter - tradeoff:</strong> <span class="perf-tradeoff-detail">requires human replay from the DLQ.</span> <strong class="perf-gain-head">Performance gain:</strong> <span class="perf-gain-detail">main queue stays healthy; poison messages leave the hot path.</span></li>
+        <li><strong class="perf-tradeoff-head">Lease recovery in small batches - tradeoff:</strong> <span class="perf-tradeoff-detail">slower full recovery after mass failure.</span> <strong class="perf-gain-head">Performance gain:</strong> <span class="perf-gain-detail">Postgres stays responsive while recovery ticks.</span></li>
+        <li><strong class="perf-tradeoff-head">Poison pill permanent failure - tradeoff:</strong> <span class="perf-tradeoff-detail">gives up on toxic payloads.</span> <strong class="perf-gain-head">Performance gain:</strong> <span class="perf-gain-detail">stops an infinite crash-resurrect loop across the pipeline.</span></li>
+      </ul>
+    </section>
+
+    <section id="retry-limits" class="doc-section">
+      <h2>Retry limits - performance decisions and tradeoffs</h2>
+
+      <h3>Stage processing retries (limit: 3)</h3>
+      <p><strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- more retries help transient third-party blips; fewer retries evict toxic work sooner.</span> At 3, a failed job spends ~90s in retry holds before quarantine. <strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- beyond that point, expected value of another attempt drops vs resource cost.</span></p>
+
+      <h3>The 30-second retry delay</h3>
+      <p><strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- backpressure: sustained downstream failure cannot flood the main queue with the same failing job.</span> <strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- legitimate recovery waits longer between attempts.</span></p>
+
+      <h3>Lease recovery retries (limit: 3)</h3>
+      <p><strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- higher limits chase flaky infra longer; lower limits quarantine poison payloads faster.</span> At 3, worst-case damage is bounded by ~3 minutes of recovery cadence before permanent failure. <strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- caps wasted CPU, DB, and queue time on jobs that never stabilize.</span></p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p><a href="execution.html">Previous</a> · <a href="index.html">Home</a> · <a href="configuration.html">Next: Configuration</a></p>
+  </footer>
+</body>
+</html>

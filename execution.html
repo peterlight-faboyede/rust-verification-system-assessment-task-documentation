@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Execution - Technical documentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;600&family=JetBrains+Mono:wght@400;500;600&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="chapter-nav" aria-label="Documentation sections">
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="application-stack.html">Application stack</a></li>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="execution.html" aria-current="page">Execution</a></li>
+      <li><a href="performance-decisions.html">Performance</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+      <li><a href="tracing-and-observability.html">Tracing</a></li>
+      <li><a href="testing.html">Testing</a></li>
+      <li><a href="security.html">Security</a></li>
+      <li><a href="devops.html">DevOps</a></li>
+    </ul>
+  </nav>
+
+  <header class="site-header">
+    <h1 class="page-header-title">Execution</h1>
+    <p class="page-header-desc">How the API and workers run: request flow, worker behavior, and end-to-end phases.</p>
+  </header>
+
+  <nav class="toc" aria-label="On this page">
+    <h2>Contents</h2>
+    <ul>
+      <li><a href="#api-execution">API execution</a></li>
+      <li><a href="#workers-outbox">Outbox relay worker</a></li>
+      <li><a href="#workers-recovery">Lease recovery worker</a></li>
+      <li><a href="#workers-processor">Stage processor worker</a></li>
+      <li><a href="#end-to-end">End-to-end walkthrough</a></li>
+      <li><a href="#build-time">Build time</a></li>
+    </ul>
+  </nav>
+
+  <main>
+    <section id="api-execution" class="doc-section">
+      <h2>API execution</h2>
+      <h3>The API layer - what it does and how it flows</h3>
+      <p class="lead">The API is a gateway. It validates, locks data into Postgres, and hands off to workers. It does no KYC work itself.</p>
+      <hr class="decor">
+
+      <div class="exec-block">
+        <h4>1. Every request passes through security before routing</h4>
+        <p>The <code>x-api-key</code> header is checked using constant-time comparison - no timing attacks. If the request carries an <code>Idempotency-Key</code>, Redis is checked first. A duplicate request never reaches Postgres - the cached response is returned immediately. Rate limiting is enforced in memory before any database or business logic is touched.</p>
+      </div>
+      <div class="exec-block">
+        <h4>2. All incoming JSON goes through a two-pass validation</h4>
+        <p>Serde validates structure first - wrong types are rejected immediately. The <code>validator</code> crate then enforces field rules: string lengths, enum bounds, required formats. Phone numbers go through <code>libphonenumber</code> for E.164 verification. Any failure returns a <code>422</code> with exact field-level errors. The handler function never runs on invalid input.</p>
+      </div>
+      <div class="exec-block">
+        <h4>3. Stage submission opens one transaction and does exactly three things</h4>
+        <p>First, it updates the stage from <code>LOCKED</code> to <code>PENDING</code>. If that update affects 0 rows - because the stage is already in progress or completed - the API returns <code>409 Conflict</code> and stops. No duplicate work enters the system.</p>
+        <p>Second, it evaluates the dependency rule. Independent stages (Phone, Liveness, Face-Match) get an <code>outbox_events</code> row inserted immediately. Dependent stages (Personal Info, Document) only get the outbox row if their predecessor is already <code>COMPLETED</code> - otherwise the insert is skipped and the worker handles the trigger later.</p>
+        <p>Third, the transaction commits and the API returns <code>202 Accepted</code>. The work is queued; the background engine takes over from here.</p>
+      </div>
+      <div class="exec-block">
+        <h4>4. The pool has a hard acquire timeout</h4>
+        <p>If the database is under load, the API waits a maximum of 10 seconds for a connection. After that it returns a 500 and moves on. Without this, requests pile up in memory until the pod crashes.</p>
+      </div>
+      <div class="exec-block">
+        <h4>5. Status polling is a single endpoint</h4>
+        <p>One <code>GET /status</code> call returns the parent session and all five stage rows in one indexed query. The response maps <code>input_data</code> and <code>response_data</code> together into an ordered timeline - the frontend sees the full verification journey in one shot.</p>
+      </div>
+      <div class="exec-block">
+        <h4>6. Errors always return the same shell</h4>
+        <p>Every 4xx and 5xx includes a <code>trace_id</code> tied to that specific request's tracing span. A client reports a bug, hands over the <code>trace_id</code>, and the exact database queries and validation errors for that millisecond are immediately retrievable from logs.</p>
+      </div>
+
+      <h3>API documentation</h3>
+      <p>API documentation is generated at compile time from the Rust structs and route macros directly. The Swagger UI at <code>/swagger-ui</code> always reflects the actual code.</p>
+      <hr class="decor">
+
+      <h3>Global headers (every request)</h3>
+      <ul class="bullets">
+        <li><code>x-api-key</code> - required on all endpoints. Missing or invalid returns <code>401</code> immediately.</li>
+        <li><code>Idempotency-Key</code> - optional, used on session start. If the key exists in Redis, the cached <code>201</code> response is returned without touching Postgres.</li>
+      </ul>
+
+      <h3><code>POST /v1/verify/session/start</code></h3>
+      <p>No payload. Creates one session row and five <code>LOCKED</code> stage rows in a single transaction. Returns <code>201</code> with the new <code>session_id</code>, status <code>ACTIVE</code>, and a message. Nothing is processed here - this just provisions the state machine.</p>
+
+      <h3>Stage submissions - shared contract</h3>
+      <p>All five share the same behavior: validate the payload, lock the stage to <code>PENDING</code>, insert an outbox event, return <code>202 Accepted</code>. The <code>202</code> is intentional - the work is queued, not complete.</p>
+      <ul class="bullets">
+        <li><code>POST .../stages/phone</code> - <code>{ phone_number }</code>. Validated against E.164 format via <code>libphonenumber</code>.</li>
+        <li><code>POST .../stages/personal-info</code> - <code>{ first_name, last_name, dob, address }</code>. <code>dob</code> is parsed as <code>YYYY-MM-DD</code>. String lengths are bounded.</li>
+        <li><code>POST .../stages/document</code> - <code>{ document_type, document_image_b64, document_number }</code>. <code>document_type</code> must be exactly <code>passport</code>, <code>national_id</code>, or <code>drivers_license</code>. Anything else is a <code>400</code>.</li>
+        <li><code>POST .../stages/liveness</code> - <code>{ liveness_image_b64 }</code>.</li>
+        <li><code>POST .../stages/face-match</code> - <code>{ face_image_b64 }</code>.</li>
+      </ul>
+      <p>Shared failure responses: <code>409 Conflict</code> - stage is not <code>LOCKED</code>. <code>422 Unprocessable Entity</code> - payload is structurally valid but fails business validation.</p>
+
+      <h3><code>GET /v1/verify/{session_id}/status</code></h3>
+      <p>No payload. Returns the full verification journey in one response - session status (<code>ACTIVE</code>, <code>COMPLETED</code>, <code>FAILED</code>) plus all five stages in order. Each stage includes its current status, the original <code>input_data</code>, the worker's <code>response_data</code> on success, and <code>error_message</code> on failure.</p>
+
+      <h3>Error shell - always this shape</h3>
+      <pre class="code-block">{
+  "error": "machine_readable_code",
+  "message": "Human readable hint",
+  "details": { "field": "reason" },
+  "trace_id": "016x_hex_string"
+}</pre>
+      <p>The <code>trace_id</code> maps directly to the tracing span for that request. A reported <code>500</code> becomes a log lookup, not a debugging session.</p>
+    </section>
+
+    <section id="workers-outbox" class="doc-section">
+      <h2>Outbox relay worker</h2>
+      <h3>What it does and how it flows</h3>
+      <p class="lead">Single mission: move rows from <code>outbox_events</code> into RabbitMQ without losing a single one.</p>
+
+      <div class="exec-block">
+        <h4>Isolated connection pool</h4>
+        <p>The relay uses its own dedicated Postgres pool, separate from the main application pool. A RabbitMQ outage that causes connections to hang can only exhaust the relay's pool - the API and stage processors keep running on the main pool, unaffected.</p>
+      </div>
+      <div class="exec-block">
+        <h4>Polling with <code>SELECT FOR UPDATE SKIP LOCKED</code></h4>
+        <p>The worker polls <code>outbox_events</code> in batches of 50 (configurable). <code>SKIP LOCKED</code> means multiple relay pods can poll the same table simultaneously without colliding - any row locked by one pod is instantly skipped by the others. Pods never wait on each other.</p>
+      </div>
+      <div class="exec-block">
+        <h4>Publish with a hard 50ms timeout</h4>
+        <p>While publishing, the worker is holding row locks in Postgres. If the RabbitMQ connection hangs, waiting indefinitely would freeze those locks. Every publish attempt has a strict 50ms timeout - if it expires, the row is skipped and the lock is released immediately. Database health is prioritized over message dispatch speed.</p>
+      </div>
+      <div class="exec-block">
+        <h4>The batch cycle is one atomic transaction</h4>
+        <ol class="bullets">
+          <li>Fetch and lock up to 50 rows (configurable).</li>
+          <li>Publish each to RabbitMQ.</li>
+          <li>Collect the IDs of successfully acknowledged messages.</li>
+          <li>Bulk <code>DELETE</code> only those successful rows.</li>
+          <li>Commit.</li>
+        </ol>
+        <p>If the pod loses power after RabbitMQ acknowledges but before the <code>DELETE</code> commits, the transaction rolls back, the locks drop, and another pod picks up the same rows. At-least-once delivery, zero data loss.</p>
+      </div>
+      <div class="exec-block">
+        <h4>Corrupt rows are skipped, not fatal</h4>
+        <p>A malformed row causes the relay to log the error, skip that row, and continue publishing the rest of the batch. One bad row never blocks the queue.</p>
+      </div>
+      <div class="exec-block">
+        <h4>Smart polling cadence</h4>
+        <p>If the outbox is empty, the worker sleeps for a full idle interval before polling again - no pointless database hammering. On startup, a random jitter (0-5 seconds) staggers the first poll across pods, preventing a thundering herd against Postgres when a deployment rolls out.</p>
+      </div>
+    </section>
+
+    <section id="workers-recovery" class="doc-section">
+      <h2>Lease recovery worker</h2>
+      <h3>What it does and how it flows</h3>
+      <p class="lead">Single mission: find jobs that were claimed but never finished, and either resurrect them or permanently bury them.</p>
+
+      <div class="exec-block">
+        <h4>Search and rescue - every 60 seconds (configurable)</h4>
+        <p>The worker polls for stages where <code>status = PROCESSING</code> and <code>expires_at</code> is in the past. A worker that claimed a job sets a 120-second lease - if that time has passed, the pod is definitively dead. Rows are fetched in batches of 25 using <code>SELECT FOR UPDATE SKIP LOCKED</code>. Small batches mean a mass node failure dropping thousands of jobs doesn't lock the entire table at once - recovery happens in surgical chunks.</p>
+      </div>
+      <div class="exec-block">
+        <h4>Reclaim - reset and re-queue</h4>
+        <p>For each expired row, the worker resets the status back to <code>PENDING</code>, increments <code>lease_recovery_count</code>, and inserts a new row into <code>outbox_events</code> - all in the same transaction. The Outbox Relay picks up that event and pushes the job back into RabbitMQ for a Stage Processor to retry. The system heals itself with no human intervention.</p>
+      </div>
+      <div class="exec-block">
+        <h4>Poison pill quarantine - stop at the limit</h4>
+        <p>Before resurrecting a job, the worker checks <code>lease_recovery_count</code>. If it has hit the configured limit (3), the job is not retried - the status is permanently set to <code>FAILED</code> and no outbox event is inserted. A payload that crashes the worker every single time is quarantined in the database. The rest of the infrastructure is protected.</p>
+      </div>
+      <div class="exec-block">
+        <h4>Transactional integrity and session sweep</h4>
+        <p>The entire batch - resets, outbox inserts, and failure writes - happens inside one Postgres transaction. If the database crashes mid-recovery, the transaction rolls back and the expired rows sit untouched until the next 60-second tick. Before the transaction commits, the worker runs a session sweep - if any stage in a session was just permanently failed, the parent session status is updated to <code>FAILED</code> in the same commit. The state machine stays in sync.</p>
+      </div>
+    </section>
+
+    <section id="workers-processor" class="doc-section">
+      <h2>Stage processor worker</h2>
+      <h3>What it does and how it flows</h3>
+      <p class="lead">The muscle of the engine. Consumes jobs from RabbitMQ, runs the verification logic, drives the stage chain forward, and handles every failure path without losing data.</p>
+
+      <div class="exec-block">
+        <h4>Intake - triage before anything else</h4>
+        <p>The worker is configured with QoS prefetch of 1 (configurable) - RabbitMQ only hands it one message at a time per thread. No memory floods from large backlogs. The moment a message arrives, it's triaged immediately. If the payload is missing <code>event_id</code>, <code>session_id</code>, or <code>stage</code>, the message is rejected with <code>requeue: false</code> and sent straight to the dead-letter queue. Garbage is never retried.</p>
+      </div>
+      <div class="exec-block">
+        <h4>Claim - idempotency and lease</h4>
+        <p>The worker tries to claim the stage by updating its status to <code>PROCESSING</code> and writing an <code>expires_at</code> 120 (configurable) seconds out. If Postgres returns 0 rows updated, another worker already claimed it or it's already completed - the worker ACKs the RabbitMQ message to clear it and moves on. No duplicate work, no errors.</p>
+      </div>
+      <div class="exec-block">
+        <h4>Execution - concurrent jobs, isolated traces</h4>
+        <p>Jobs run concurrently inside a <code>JoinSet</code>. Each job gets its own tracing span so logs from 50 concurrent tasks never bleed into each other. A failure in Job A produces a clean, isolated trace.</p>
+      </div>
+      <div class="exec-block">
+        <h4>Stage handoff - decentralized orchestration</h4>
+        <p>When a stage completes, the worker checks inside the same transaction whether a successor stage is waiting. If it is, the outbox event for the next stage is inserted before the commit. Stage 2 is triggered the instant Stage 1 commits - no cron job, no external scheduler, no delay.</p>
+      </div>
+      <div class="exec-block">
+        <h4>Session sweep - global state stays in sync</h4>
+        <p>After every completion or failure, the worker checks all five stages for the session. If all five are <code>COMPLETED</code>, the session is promoted to <code>COMPLETED</code>. If one is permanently <code>FAILED</code>, the session becomes <code>FAILED</code>. This happens in the same transaction as the stage update.</p>
+      </div>
+      <div class="exec-block">
+        <h4>Failure path - retries then graveyard</h4>
+        <p>If the KYC work fails, the stage is set to <code>FAILED</code> and <code>retry_count</code> is incremented. If retries remain, the payload is published to the retry exchange - which holds it for 30 seconds before routing it back to the main queue - and the original message is ACKed. If retries are exhausted, the message is sent to the terminal dead-letter queue and the stage stays permanently <code>FAILED</code>.</p>
+      </div>
+      <div class="exec-block">
+        <h4>Graceful shutdown - no mid-job corruption</h4>
+        <p>On <code>SIGTERM</code>, the worker stops pulling new messages immediately. It then waits for all in-flight jobs in the <code>JoinSet</code> to finish before the process exits. A deployment never kills a job halfway through.</p>
+      </div>
+    </section>
+
+    <section id="end-to-end" class="doc-section">
+      <h2>End-to-end walkthrough</h2>
+
+      <figure class="diagram-showcase">
+        <div class="diagram-frame">
+          <img src="https://drive.google.com/thumbnail?id=1zeOKVxJu_JYh6hfRUWKXjsVxgPxeE504&amp;sz=w2000" width="1200" height="675" alt="End-to-end sequence diagram preview" loading="lazy" referrerpolicy="no-referrer">
+          <div class="diagram-overlay">
+            <p class="diagram-hint">Preview - opens full diagram in Google Drive</p>
+            <a class="diagram-view-btn" href="https://drive.google.com/file/d/1zeOKVxJu_JYh6hfRUWKXjsVxgPxeE504/view?usp=drive_link" target="_blank" rel="noopener noreferrer">Click to view</a>
+          </div>
+        </div>
+        <figcaption class="diagram-caption">End-to-end sequence diagram (Google Drive)</figcaption>
+      </figure>
+
+      <h3>Phase 1 - Session start (<code>POST /session/start</code>)</h3>
+      <p>The API key is checked in constant time. If an idempotency key is present, Redis is checked first - a duplicate returns the cached response immediately. Otherwise, one transaction opens: one session row (<code>ACTIVE</code>) and five stage rows (<code>LOCKED</code>) are inserted together. Transaction commits, result is cached in Redis for 2 hours, <code>201 Created</code> returned with the session UUID.</p>
+
+      <h3>Phase 2 - Stage submission (<code>POST /stages/{name}</code>)</h3>
+      <p>Payload hits <code>ValidatedJson</code> - Serde validates structure, <code>validator</code> enforces field rules, <code>libphonenumber</code> validates phone format where applicable. Any failure returns <code>422</code> with field-level detail.</p>
+      <p>Inside a transaction, the stage is updated from <code>LOCKED</code> to <code>PENDING</code>. Zero rows affected means it was already submitted - <code>409 Conflict</code> returned, nothing else happens.</p>
+      <p>Then the dependency fork: independent stages (1, 4, 5) get an <code>outbox_events</code> row inserted immediately. Dependent stages (2, 3) check if their predecessor is <code>COMPLETED</code> - if yes, outbox event is inserted; if no, the insert is skipped and the stage waits. Transaction commits, <code>202 Accepted</code> returned.</p>
+
+      <h3>Phase 3 - Outbox relay</h3>
+      <p>Every 500ms the relay fetches up to 50 rows using <code>SELECT FOR UPDATE SKIP LOCKED</code> from its own isolated pool. Multiple relay pods grab different rows simultaneously, never blocking each other.</p>
+      <p>Each row is published to RabbitMQ under a strict 50ms timeout. If the connection hangs, the timeout fires, the row is skipped, and the lock is released - database health over message speed. Successfully ACKed message IDs are collected, bulk-deleted from the outbox, and the transaction commits.</p>
+
+      <h3>Phase 4 - Stage processor</h3>
+      <p>Worker consumes with prefetch of 1. Malformed payload is immediately rejected to the DLQ - no retries on garbage. Valid payload opens a transaction, claims the stage (<code>PROCESSING</code>), and sets <code>expires_at</code>.</p>
+      <p><strong>Success path:</strong> Stage is updated to <code>COMPLETED</code> with <code>response_data</code>. If a successor stage is <code>PENDING</code>, its outbox event is inserted in the same transaction. Session sweep runs - all five completed means the session becomes <code>COMPLETED</code>. Transaction commits, RabbitMQ ACK sent.</p>
+      <p><strong>Failure path:</strong> Stage is updated to <code>FAILED</code>, error saved, <code>retry_count</code> incremented. If under the retry limit, the payload goes to the retry exchange (30s hold, then back to main queue) and the original message is ACKed. If retries are exhausted, the message is rejected to the terminal dead-letter queue and the stage stays permanently <code>FAILED</code>. Session sweep runs in both cases.</p>
+
+      <h3>Phase 5 - Lease recovery</h3>
+      <p>Every 60 seconds the worker queries for <code>PROCESSING</code> rows where <code>expires_at &lt; NOW()</code>, in batches of 25 using <code>SKIP LOCKED</code>.</p>
+      <p>If <code>lease_recovery_count</code> is under the limit: stage reset to <code>PENDING</code>, count incremented, fresh outbox event inserted - the job re-enters the pipeline. If at the limit: stage permanently set to <code>FAILED</code>, no outbox event inserted, session sweep runs. A payload that crashes the worker every time is quarantined permanently. Everything happens in one transaction - a database crash mid-recovery leaves the rows expired and untouched until the next tick.</p>
+
+      <h3>Phase 6 - Status poll (<code>GET /status</code>)</h3>
+      <p>API key checked. Two indexed queries run - one for the session row, one for all five stage rows. Results mapped into <code>SessionStatusResponse</code> and returned as <code>200 OK</code>.</p>
+
+      <div class="callout">
+        <p><strong>The core guarantee.</strong> The database is the source of truth. RabbitMQ is purely a signal. The transactional outbox, <code>SKIP LOCKED</code> concurrency, timed leases, and three-tier dead-letter topology together guarantee that every stage is eventually processed - regardless of network conditions, pod failures, or duplicate message delivery.</p>
+      </div>
+
+    </section>
+
+    <section id="build-time" class="doc-section">
+      <h2>Build time consideration</h2>
+      <p>Compile-time and image concerns (e.g. <code>SQLX_OFFLINE</code>, layered Docker builds) are covered in detail under <a href="devops.html">DevOps</a> and <a href="performance-decisions.html">Performance decisions</a>.</p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p><a href="architecture.html">Previous</a> · <a href="index.html">Home</a> · <a href="performance-decisions.html">Next: Performance</a></p>
+  </footer>
+</body>
+</html>

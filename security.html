@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Security - Technical documentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;600&family=JetBrains+Mono:wght@400;500;600&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="chapter-nav" aria-label="Documentation sections">
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="application-stack.html">Application stack</a></li>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="execution.html">Execution</a></li>
+      <li><a href="performance-decisions.html">Performance</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+      <li><a href="tracing-and-observability.html">Tracing</a></li>
+      <li><a href="testing.html">Testing</a></li>
+      <li><a href="security.html" aria-current="page">Security</a></li>
+      <li><a href="devops.html">DevOps</a></li>
+    </ul>
+  </nav>
+
+  <header class="site-header">
+    <h1 class="page-header-title">Security</h1>
+    <p class="page-header-desc">Zero trust at the edge, payload defense, database posture, containers, and leak prevention.</p>
+  </header>
+
+  <nav class="toc" aria-label="On this page">
+    <h2>Contents</h2>
+    <ul>
+      <li><a href="#edge">Edge security</a></li>
+      <li><a href="#payload">Payload defense</a></li>
+      <li><a href="#database">Database security</a></li>
+      <li><a href="#containers">Container hardening</a></li>
+      <li><a href="#leaks">Leak prevention</a></li>
+    </ul>
+  </nav>
+
+  <main>
+    <section id="edge" class="doc-section">
+      <h2>Edge security</h2>
+      <p>API key authentication uses constant-time comparison, not standard string equality. Standard comparison fails the moment it hits a wrong character - measurable response time differences let attackers guess keys byte by byte. Constant-time comparison takes identical time regardless of where the mismatch occurs, eliminating the attack vector entirely.</p>
+      <p>Idempotency keys backed by Redis mean duplicate session-start requests - whether from a glitchy network or a deliberate flood - return the cached response. The database sees exactly one write regardless of how many requests arrive.</p>
+      <p>Rate limits and CORS origins are environment variables. Under an active attack, both can be tightened without touching or redeploying code.</p>
+    </section>
+
+    <section id="payload" class="doc-section">
+      <h2>Payload defense</h2>
+      <p><code>ValidatedJson</code> enforces a two-phase gate before any handler runs. Serde validates structure first - wrong types are rejected. The <code>validator</code> crate then enforces field rules: string length caps prevent memory exhaustion, strict enums reject anything outside the allowed set. Phone numbers go through <code>libphonenumber</code> - regex is not sufficient for international formats.</p>
+      <p>If a crafted payload crashes the worker, the lease recovery system tracks it. After three crashes, the payload is permanently quarantined as <code>FAILED</code> and removed from active processing. The cluster is protected from infinite crash loops.</p>
+    </section>
+
+    <section id="database" class="doc-section">
+      <h2>Database security</h2>
+      <p>UUID primary keys carry 122 bits of entropy - sequential IDs make enumeration trivial, UUIDs make it computationally impossible. No <code>user_id</code> is stored anywhere in the verification tables. If the database is breached, the attacker gets fragmented verification data with no way to link it to real user accounts. The session UUID is the only credential.</p>
+      <p>All SQL uses parameterized queries verified at compile time against the actual schema. SQL injection is not possible - there is no dynamic query construction.</p>
+      <p><code>input_data</code> is written once by the API, <code>response_data</code> written once by the worker. Neither can be modified after the fact. The audit trail is structurally immutable.</p>
+    </section>
+
+    <section id="containers" class="doc-section">
+      <h2>Container hardening</h2>
+      <p>Production images are built on distroless base - no shell, no package manager, no system utilities. Remote code execution via a zero-day lands an attacker in a container with nothing to work with. The Rust binary runs as PID 1 directly.</p>
+      <p>Database migrations run in a separate short-lived Alpine container that exits immediately after applying the schema. The API and worker pods have no schema-altering privileges and no migration code.</p>
+    </section>
+
+    <section id="leaks" class="doc-section">
+      <h2>Leak prevention</h2>
+      <p>All secrets - database URL, Redis URL, AMQP URL, API key - are wrapped in <code>secrecy::SecretString</code>. Accidentally printing the config struct outputs <code>[REDACTED]</code>. Secrets cannot reach logs regardless of developer error.</p>
+      <p>Internal 500 errors log the full technical detail internally. The client receives only <code>{"error": "internal_error", "message": "An unexpected error occurred", "trace_id": "..."}</code>. Database schema names, table structures, and stack traces never leave the server.</p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p><a href="testing.html">Previous</a> · <a href="index.html">Home</a> · <a href="devops.html">Next: DevOps</a></p>
+  </footer>
+</body>
+</html>

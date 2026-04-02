@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Application stack - Technical documentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;600&family=JetBrains+Mono:wght@400;500;600&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="chapter-nav" aria-label="Documentation sections">
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="application-stack.html" aria-current="page">Application stack</a></li>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="execution.html">Execution</a></li>
+      <li><a href="performance-decisions.html">Performance</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+      <li><a href="tracing-and-observability.html">Tracing</a></li>
+      <li><a href="testing.html">Testing</a></li>
+      <li><a href="security.html">Security</a></li>
+      <li><a href="devops.html">DevOps</a></li>
+    </ul>
+  </nav>
+
+  <header class="site-header">
+    <h1 class="page-header-title">Application stack</h1>
+    <p class="page-header-desc">Core tooling and libraries for the verification platform.</p>
+  </header>
+
+  <nav class="toc" aria-label="On this page">
+    <h2>Contents</h2>
+    <ul>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#runtime">Runtime &amp; HTTP</a></li>
+      <li><a href="#data">Data &amp; messaging</a></li>
+      <li><a href="#serialization">Serialization &amp; validation</a></li>
+      <li><a href="#observability">Observability &amp; config</a></li>
+      <li><a href="#security">Security &amp; reliability</a></li>
+      <li><a href="#api-docs">API docs</a></li>
+    </ul>
+  </nav>
+
+  <main>
+    <section id="overview" class="doc-section">
+      <h2>Core stack at a glance</h2>
+      <div class="stack-glance">
+        <div class="stack-glance-row">
+          <span class="stack-glance-label">Runtime &amp; HTTP</span>
+          <div class="stack-glance-tags">
+            <span class="stack-tag stack-tag--primary">Rust</span>
+            <span class="stack-tag">Tokio</span>
+            <span class="stack-tag">Axum</span>
+            <span class="stack-tag">Tower</span>
+          </div>
+        </div>
+        <div class="stack-glance-row">
+          <span class="stack-glance-label">Data &amp; Messaging</span>
+          <div class="stack-glance-tags">
+            <span class="stack-tag">PostgreSQL</span>
+            <span class="stack-tag">SQLx</span>
+            <span class="stack-tag">Redis</span>
+            <span class="stack-tag">RabbitMQ</span>
+            <span class="stack-tag">Lapin</span>
+          </div>
+        </div>
+        <div class="stack-glance-row">
+          <span class="stack-glance-label">Observability &amp; Config</span>
+          <div class="stack-glance-tags">
+            <span class="stack-tag">Tracing</span>
+            <span class="stack-tag">tracing-subscriber</span>
+            <span class="stack-tag">Envy</span>
+            <span class="stack-tag">Secrecy</span>
+          </div>
+        </div>
+        <div class="stack-glance-row">
+          <span class="stack-glance-label">Data &amp; API Docs</span>
+          <div class="stack-glance-tags">
+            <span class="stack-tag">Serde</span>
+            <span class="stack-tag">Validator</span>
+            <span class="stack-tag">Utoipa</span>
+          </div>
+        </div>
+      </div>
+      <hr class="decor">
+
+      <div class="stack-grid">
+        <article id="runtime" class="stack-card">
+          <h3>Runtime &amp; HTTP</h3>
+          <ul>
+            <li><strong>Tokio</strong> - async runtime, the concurrency foundation. async-std was skipped due to weaker ecosystem support.</li>
+            <li><strong>Axum</strong> - HTTP routing with strong type safety, sits naturally on Tower. actix-web was ruled out for being more actor-oriented and less aligned here.</li>
+            <li><strong>Tower / tower-http / tower_governor</strong> - middleware as composable layers: CORS, tracing, request IDs, and rate limiting all live here, outside business logic where they belong.</li>
+          </ul>
+        </article>
+        <article id="data" class="stack-card">
+          <h3>Data &amp; messaging</h3>
+          <ul>
+            <li><strong>SQLx</strong> - async PostgreSQL with compile-time query validation. Diesel's DSL felt too restrictive for the fine-tuned SQL this system needs.</li>
+            <li><strong>Lapin</strong> - AMQP client for RabbitMQ. Chosen for fine-grained control; higher-level wrappers hide too much.</li>
+            <li><strong>Redis</strong> - idempotency checks and distributed locks. Fast coordination layer between workers and the API.</li>
+          </ul>
+        </article>
+        <article id="serialization" class="stack-card">
+          <h3>Serialization &amp; validation</h3>
+          <ul>
+            <li><strong>Serde + serde_json</strong> - standard, mature, no real alternative in Rust.</li>
+            <li><strong>Validator</strong> - declarative rules on DTOs, enforced before any core logic runs.</li>
+            <li><strong>phonenumber</strong> - international phone validation. Regex simply isn't reliable for global numbering rules.</li>
+            <li><strong>UUID + Chrono</strong> - non-sequential IDs and consistent UTC timestamps throughout.</li>
+          </ul>
+        </article>
+        <article id="observability" class="stack-card">
+          <h3>Observability &amp; config</h3>
+          <ul>
+            <li><strong>Tracing + tracing-subscriber</strong> - structured spans that survive async boundaries, formatted as JSON for observability pipelines.</li>
+            <li><strong>Envy + dotenvy</strong> - typed config from environment variables, fails fast on missing values. <code>dotenvy</code> replaces the unmaintained <code>dotenv</code>.</li>
+            <li><strong>Secrecy</strong> - wraps sensitive values to prevent accidental exposure in logs or memory.</li>
+          </ul>
+        </article>
+        <article id="security" class="stack-card">
+          <h3>Security &amp; reliability</h3>
+          <ul>
+            <li><strong>thiserror + anyhow</strong> - structured errors for domain logic, flexible errors for worker flows.</li>
+            <li><strong>subtle</strong> - constant-time comparisons to prevent timing attacks on sensitive checks.</li>
+            <li><strong>rand</strong> - secure token generation and retry jitter.</li>
+            <li><strong>futures-util</strong> - stream and async utilities the standard library doesn't cover yet.</li>
+          </ul>
+        </article>
+        <article id="api-docs" class="stack-card api-docs-block">
+          <h3>API docs</h3>
+          <ul>
+            <li><strong>Utoipa + utoipa-swagger-ui</strong> - OpenAPI spec generated at compile time, served as an interactive Swagger UI. Manual Swagger files drift; this keeps docs and code in sync automatically.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p><a href="index.html">Home</a> · <a href="architecture.html">Next: Architecture</a></p>
+  </footer>
+</body>
+</html>

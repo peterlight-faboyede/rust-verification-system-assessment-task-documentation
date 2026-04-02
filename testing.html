@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Testing - Technical documentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;600&family=JetBrains+Mono:wght@400;500;600&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="chapter-nav" aria-label="Documentation sections">
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="application-stack.html">Application stack</a></li>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="execution.html">Execution</a></li>
+      <li><a href="performance-decisions.html">Performance</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+      <li><a href="tracing-and-observability.html">Tracing</a></li>
+      <li><a href="testing.html" aria-current="page">Testing</a></li>
+      <li><a href="security.html">Security</a></li>
+      <li><a href="devops.html">DevOps</a></li>
+    </ul>
+  </nav>
+
+  <header class="site-header">
+    <h1 class="page-header-title">Testing</h1>
+    <p class="page-header-desc">Unit, integration, and stress tests - three worlds, three purposes.</p>
+  </header>
+
+  <nav class="toc" aria-label="On this page">
+    <h2>Contents</h2>
+    <ul>
+      <li><a href="#foundation">Foundation</a></li>
+      <li><a href="#unit">Unit tests</a></li>
+      <li><a href="#integration">Integration tests</a></li>
+      <li><a href="#stress">Stress tests</a></li>
+    </ul>
+  </nav>
+
+  <main>
+    <section id="foundation" class="doc-section">
+      <h2>Foundation: three testing worlds, three purposes</h2>
+      <p>The test suite is divided into three completely separate environments. Each exists for a different reason and tests a different level of the system.</p>
+      <p><strong>Unit tests</strong> run entirely in memory. No database, no Redis, no RabbitMQ. They test pure logic - config parsing, error mapping, validation boundaries, type serialization. If a unit test needs infrastructure to run, it's testing the wrong thing.</p>
+      <p><strong>Integration tests</strong> run against real infrastructure. Every test gets its own ephemeral Postgres database, spun up and torn down automatically. They test that the actual SQL, the actual locks, the actual business rules, and the actual HTTP layer all behave correctly when wired together. Mocks are deliberately avoided here - the point is to prove the system works against real Postgres transactions and real Redis state.</p>
+      <p><strong>Stress tests</strong> run against the full live cluster - API, worker, Postgres, Redis, RabbitMQ all running simultaneously. They don't test correctness; they test behavior under load. The goal is to find where the system bends before it breaks in production.</p>
+    </section>
+
+    <section id="unit" class="doc-section">
+      <h2>Unit tests - pure logic, zero infrastructure</h2>
+      <ul class="bullets">
+        <li><strong>Config validation</strong> - proves that misconfigured environment variables (min delay higher than max, malformed CORS URLs) crash the app at boot, not silently in production.</li>
+        <li><strong>Error mapping</strong> - proves every internal error variant maps to the correct HTTP status code and JSON shape. A database <code>RowNotFound</code> never leaks raw SQL text to the client.</li>
+        <li><strong><code>ValidatedJson</code> extractor</strong> - proves the exact boundary between a 400 (broken JSON structure) and a 422 (valid JSON, failed business rules).</li>
+        <li><strong>Redis key formatting</strong> - proves idempotency keys are constructed correctly and HTTP header extraction works regardless of casing.</li>
+        <li><strong>Stage helpers</strong> - proves the predecessor/successor chain is correct. Stage 3 cannot unlock Stage 5. The dependency graph has no gaps or shortcuts.</li>
+        <li><strong>Phone validation</strong> - proves <code>libphonenumber</code> catches invalid international numbers before they reach the database.</li>
+        <li><strong>Payload struct validation</strong> - proves empty base64 strings, impossible dates of birth, and missing required fields all fail validation. Enums serialize and deserialize in strict snake_case only.</li>
+      </ul>
+    </section>
+
+    <section id="integration" class="doc-section">
+      <h2>Integration tests - real infrastructure, real behavior</h2>
+      <ul class="bullets">
+        <li><strong>Database layer</strong> - proves the raw SQL works before anything else. <code>FOR UPDATE SKIP LOCKED</code> is tested directly. The session sweep logic is proven: one failed stage correctly flips the parent session to <code>FAILED</code>.</li>
+        <li><strong>Outbox relay</strong> - a scripted publisher simulates TCP hangs, publish timeouts, and corrupt payloads. Proves that when RabbitMQ rejects a publish, the Postgres transaction rolls back and the outbox row survives intact. A 10,000-row batch test proves the indexes keep queries under 5 seconds.</li>
+        <li><strong>HTTP layer</strong> - the full Axum router is wired with a live <code>AppState</code>. Tests bombard it with missing API keys (401), malformed JSON (400), and business validation failures (422). The idempotency key is tested against live Redis - double-submitting session start must not create duplicate database rows.</li>
+        <li><strong>Service logic</strong> - proves the sequential dependency chain. Stage 1 submission hits the outbox immediately. Stage 2 submission does not hit the outbox because Stage 1 isn't complete yet. The dependency tree is enforced at the database level.</li>
+        <li><strong>Lease recovery</strong> - Tokio's time control is used to simulate the 60-second recovery loop without waiting 60 seconds in CI. A custom tracing layer intercepts internal spans to prove the worker sleeps correctly, resets its ticker on finding work, and doesn't thrash the database when idle. The poison pill defense is proven: three crashes result in permanent <code>FAILED</code>, no further recovery attempts.</li>
+        <li><strong>Stage processor</strong> - payload parsing is tested without needing a live RabbitMQ connection. Worker idempotency is proven: claiming an already-completed stage is a safe no-op. The sequential unlock is proven: completing Stage 1 inside a transaction automatically inserts the Stage 2 outbox event.</li>
+      </ul>
+    </section>
+
+    <section id="stress" class="doc-section">
+      <h2>Stress tests - full cluster under load</h2>
+      <p>Every verification session is launched at the exact same millisecond using <code>Promise.allSettled</code> - a deliberate thundering herd. This forces Postgres row locks, outbox micro-batching, and RabbitMQ routing to prove themselves under maximum contention simultaneously.</p>
+      <p>The script mounts the Docker socket and acts as its own infrastructure monitor - querying real-time CPU, RAM, and network I/O for every container every 3 seconds. Network stats are delta-computed so the numbers reflect bandwidth during the test window specifically, not since the container booted. A slow response can be traced directly to a container hitting 100% CPU.</p>
+      <p>Results are written to three CSV files:</p>
+      <ul class="bullets">
+        <li><strong>Session-level outcomes</strong> - pass/fail result for every verification session in the run.</li>
+        <li><strong>Per-stage round-trip and wall-clock timing</strong> - granular latency for each of the five stages across all sessions.</li>
+        <li><strong>Hardware telemetry</strong> - CPU, RAM, and network I/O mapped against elapsed test seconds for every container.</li>
+      </ul>
+      <p>Internal status codes are translated to plain English before writing - <code>LOCKED</code> becomes "Not started yet" - so results are readable without understanding the state machine.</p>
+      <p>A hard deadline backed by an <code>AbortController</code> guarantees the script exits cleanly even during a catastrophic cluster failure. Whatever data was collected up to that point is written to CSV. Test data is never lost.</p>
+      <p>Node.js was chosen over Rust for the stress script - native <code>fetch</code>, async event loop, and JSON/CSV handling without compilation overhead. It's the right tool for firing concurrent HTTP traffic and wrangling reports.</p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p><a href="tracing-and-observability.html">Previous</a> · <a href="index.html">Home</a> · <a href="security.html">Next: Security</a></p>
+  </footer>
+</body>
+</html>

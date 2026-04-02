@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Architecture - Technical documentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;600&family=JetBrains+Mono:wght@400;500;600&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="chapter-nav" aria-label="Documentation sections">
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="application-stack.html">Application stack</a></li>
+      <li><a href="architecture.html" aria-current="page">Architecture</a></li>
+      <li><a href="execution.html">Execution</a></li>
+      <li><a href="performance-decisions.html">Performance</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+      <li><a href="tracing-and-observability.html">Tracing</a></li>
+      <li><a href="testing.html">Testing</a></li>
+      <li><a href="security.html">Security</a></li>
+      <li><a href="devops.html">DevOps</a></li>
+    </ul>
+  </nav>
+
+  <header class="site-header">
+    <h1 class="page-header-title">Architecture</h1>
+    <p class="page-header-desc">Topology, API and worker design, contracts, repository layout, data model, and messaging.</p>
+  </header>
+
+  <nav class="toc" aria-label="On this page">
+    <h2>Contents</h2>
+    <ul>
+      <li><a href="#high-level">High-level architecture</a></li>
+      <li><a href="#api-architecture">API architecture</a></li>
+      <li><a href="#request-contract">Request contract</a></li>
+      <li><a href="#response-contract">Response contract</a></li>
+      <li><a href="#worker-architecture">Worker architecture</a></li>
+      <li><a href="#folder-structure">Folder structure</a></li>
+      <li><a href="#data-architecture">Data architecture</a></li>
+      <li><a href="#message-queue">Message queue</a></li>
+    </ul>
+  </nav>
+
+  <main>
+    <section id="high-level" class="doc-section">
+      <h2>High-level architecture</h2>
+      <figure class="diagram-showcase">
+        <div class="diagram-frame">
+          <img src="https://drive.google.com/thumbnail?id=1hvuUGL9RQ5-3neoPAERRRDDaZQ06-4ct&amp;sz=w2000" width="1200" height="675" alt="High-level architecture diagram preview" loading="lazy" referrerpolicy="no-referrer">
+          <div class="diagram-overlay">
+            <p class="diagram-hint">Preview - opens full diagram in Google Drive</p>
+            <a class="diagram-view-btn" href="https://drive.google.com/file/d/1hvuUGL9RQ5-3neoPAERRRDDaZQ06-4ct/view?usp=sharing" target="_blank" rel="noopener noreferrer">Click to view</a>
+          </div>
+        </div>
+        <figcaption class="diagram-caption">Architecture diagram (Google Drive)</figcaption>
+      </figure>
+
+      <h3>Three workers. One clear job each</h3>
+      <p>Before anything else - this system runs exactly three background workers, and none of them overlap in responsibility:</p>
+      <div class="worker-cards">
+        <div class="worker-card"><strong>Outbox relay</strong> Bridges Postgres to RabbitMQ</div>
+        <div class="worker-card"><strong>Stage processor</strong> Consumes from RabbitMQ and drives verification logic</div>
+        <div class="worker-card"><strong>Lease recovery</strong> Cleans up crashed jobs, runs entirely out-of-band</div>
+      </div>
+      <p>That's the foundation. Every data path in this system flows through one of those three, or the API itself.</p>
+
+      <h3>The topology</h3>
+      <div class="topology-flow">
+        <div class="topology-node">
+          <strong>Edge → API layer</strong>
+          <p>The client hits the API over HTTP/REST. The API talks to exactly two things: Redis to validate the idempotency key, and Postgres to write the session and seed the <code>outbox_events</code> table transactionally. The API never touches RabbitMQ - that boundary is intentional.</p>
+        </div>
+        <div class="topology-node">
+          <strong>Redis</strong>
+          <p>Exclusive to the API layer. Workers never interact with it.</p>
+        </div>
+        <div class="topology-node">
+          <strong>PostgreSQL</strong>
+          <p>The central nervous system. Four things connect to it: the API (writes sessions and outbox rows); the Outbox Relay Worker (reads and deletes outbox rows); the Stage Processor Worker (updates stage statuses, inserts next outbox row on stage unlock); the Lease Recovery Worker (scans for zombies, resets them, re-inserts outbox rows).</p>
+        </div>
+        <div class="topology-node">
+          <strong>Outbox relay worker</strong>
+          <p>Polls <code>outbox_events</code> from Postgres via its own isolated connection pool, then pushes those events into RabbitMQ over TCP. It's the only component that writes to the broker.</p>
+        </div>
+        <div class="topology-node">
+          <strong>RabbitMQ</strong>
+          <p>Sits entirely between the workers. Receives from the Outbox Relay, delivers to the Stage Processor. Holds the Main, Retry, and Dead-Letter queues.</p>
+        </div>
+        <div class="topology-node">
+          <strong>Stage processor worker</strong>
+          <p>Consumes from RabbitMQ with a strict prefetch of 1. Updates stage status in Postgres. If a completed stage unlocks the next one, it writes the successor's <code>outbox_event</code> directly back into Postgres - feeding the relay again.</p>
+        </div>
+        <div class="topology-node">
+          <strong>Lease recovery worker</strong>
+          <p>Postgres only. No RabbitMQ. Scans for timed-out or crashed jobs, resets their state, and inserts fresh <code>outbox_events</code> - which naturally flow back through the Outbox Relay as if nothing crashed.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="api-architecture" class="doc-section">
+      <h2>API architecture</h2>
+      <h3>Foundation: one process, many concurrent requests</h3>
+      <p class="lead">Before diving into the layers - the API is a single OS process running a Tokio async runtime. There are no threads per request, no forking, no copying of state. Tokio multiplexes thousands of concurrent connections across a small fixed thread pool. Everything below is built on top of that single fact.</p>
+
+      <div class="numbered-block">
+        <div class="numbered-item">
+          <h4>The HTTP engine - Hyper &amp; Axum</h4>
+          <p>Axum is not a heavy framework. It's a thin routing layer on top of Hyper, which handles the raw TCP byte stream and HTTP header parsing. Every route is a <code>tower::Service</code> - a typed async function from Request to Response. Routing a request to a handler is a pointer lookup, nothing more. No reflection, no magic, no overhead.</p>
+        </div>
+        <div class="numbered-item">
+          <h4>Shared memory - <code>Arc&lt;AppState&gt;</code></h4>
+          <p>The Postgres pool, Redis manager, AMQP connection, and config all live in one AppState struct, wrapped in an Arc. Ten thousand concurrent requests don't get ten thousand copies - they get ten thousand pointers to the same struct, backed by a single atomic counter increment. One allocation at boot, zero copies at runtime.</p>
+        </div>
+        <div class="numbered-item">
+          <h4>The interceptors - FromRequest</h4>
+          <p>Validation never lives inside handlers. <code>ValidatedJson&lt;T&gt;</code> implements FromRequest, so Axum runs it before the handler function is even scheduled. If Serde parsing or field validation fails, the extractor returns a 400 or 422 directly and the handler never wakes up. The edge is the enforcement point.</p>
+        </div>
+        <div class="numbered-item">
+          <h4>The middleware onion - Tower layers</h4>
+          <p>Every request passes through a stack of <code>tower::Layer</code>s before it reaches the router. The outermost layer is TraceLayer - it creates a tracing span and stamps a <code>trace_id</code> onto the async context. Every DB query, Redis call, and log line emitted deeper in the stack inherits that ID automatically. No manual propagation needed.</p>
+        </div>
+        <div class="numbered-item">
+          <h4>The database multiplexer - PgPool</h4>
+          <p>Postgres connections are opened once at boot, held in PgPool, and leased per request via <code>pool.begin().await</code>. When the transaction commits or the variable drops out of scope, the connection returns to the pool immediately. This is what lets 20 Postgres connections serve thousands of concurrent HTTP requests without contention.</p>
+        </div>
+      </div>
+
+      <h3 id="request-contract" class="subsection-title">Request contract</h3>
+      <h4>URL design - resource-oriented slugs</h4>
+      <code class="endpoint">POST /v1/verify/{session_id}/stages/{stage_name}</code>
+      <ul class="bullets">
+        <li>Every segment is deliberate. <code>/v1/</code> is explicit versioning - when a v2 flow ships with 10 stages, both versions run concurrently without breaking existing clients.</li>
+        <li><code>{session_id}</code> in the path rather than the body lets the router and log infrastructure (CloudWatch) index by session ID without parsing JSON payloads.</li>
+      </ul>
+
+      <h4>Request contract - zero trust at the border</h4>
+      <p>The principle: assume every incoming request is malformed or malicious until the type system proves otherwise. Business logic never sees bad data.</p>
+      <ul class="bullets">
+        <li><strong>ValidatedJson&lt;T&gt;</strong> runs a two-pass check before the handler wakes up. The first pass is structural - does the JSON deserialize into the expected Rust struct? The second pass is semantic - is that phone number actually valid for Nigeria or the UK? Both passes must succeed. Failure at either returns a 400 or 422 immediately at the extractor layer.</li>
+        <li><strong>x-api-key authentication</strong> uses the <code>subtle</code> crate for constant-time comparison. Standard string equality (<code>==</code>) short-circuits and returns faster when early characters match - an attacker can measure response times and progressively guess the key character by character. Constant-time comparison takes identical time regardless of how many characters match, eliminating that attack surface entirely.</li>
+        <li><strong>Idempotency-Key</strong> is optional on session start. Once present, it gates duplicate submissions at the Redis layer before anything touches the database.</li>
+      </ul>
+
+      <h3 id="response-contract" class="subsection-title">Response contract</h3>
+      <h4>Predictable by design</h4>
+      <p>Every response from this API, success or failure, follows a fixed shape. Clients never have to guess what they'll get back.</p>
+
+      <h4>Success (201/202)</h4>
+      <pre class="code-block">{
+  "session_id": "uuid",
+  "status": "PENDING",
+  "message": "Human readable hint"
+}</pre>
+
+      <h4>Error (4xx/5xx)</h4>
+      <pre class="code-block">{
+  "error": "validation_failed",
+  "message": "One or more fields failed validation",
+  "trace_id": "016x_hex_string",
+  "details": { "phone": "Invalid format" }
+}</pre>
+
+      <hr class="decor">
+      <ul class="bullets">
+        <li><strong><code>trace_id</code> on every error.</strong> When a frontend engineer reports a 500, you don't ask for a screenshot - you ask for the <code>trace_id</code>. Paste it into your logs and you get the exact database queries, Redis checks, and RabbitMQ interactions for that specific request, down to the millisecond. No guessing, no reproduction steps needed.</li>
+        <li><strong><code>202 Accepted</code> instead of <code>200 OK</code>.</strong> Stage submissions return <code>202</code> because <code>200</code> implies the work is done. It isn't - the KYC processing happens asynchronously via RabbitMQ workers. <code>202</code> is an explicit contract with the client: "We received it, validated it, and queued it. The engine is still running."</li>
+        <li><strong>Error masking on 500s.</strong> The real error - <code>relation "users" does not exist</code>, a raw Postgres panic - is logged internally. The client only sees <code>"An unexpected error occurred"</code>. Exposing internal error messages leaks your database schema, table names, and system internals to anyone probing the API.</li>
+      </ul>
+    </section>
+
+    <section id="worker-architecture" class="doc-section">
+      <h2>Worker architecture</h2>
+      <h3>Foundation: workers are not threads</h3>
+      <p class="lead">Before the layers - each worker is a single long-running Tokio async task, not a thread pool spinning up per job. There's no thread-per-message model here. Tokio's event loop cooperatively schedules everything, and the primitives below are what make that safe, concurrent, and survivable under real infrastructure pressure.</p>
+      <hr class="decor">
+
+      <div class="numbered-block">
+        <div class="numbered-item">
+          <h4>The async engine - Tokio &amp; JoinSets</h4>
+          <p>Each worker runs an infinite <code>loop {}</code> inside a Tokio task. When the Stage Processor pulls multiple messages, it doesn't process them one-by-one, nor does it blindly <code>tokio::spawn</code> (which leaks if tasks hang). Every message becomes a future pushed into a <code>tokio::task::JoinSet</code>. The set fires them concurrently - the moment one task awaits network I/O, the CPU is yielded to another. Parallelism without threads.</p>
+        </div>
+        <div class="numbered-item">
+          <h4>Graceful shutdown - CancellationToken</h4>
+          <p>Kubernetes doesn't ask nicely - it sends <code>SIGTERM</code> and counts down. Every loop and background task gets a clone of a <code>tokio_util::sync::CancellationToken</code> at boot. When shutdown fires, <code>cancel.cancel()</code> triggers. Every <code>select!</code> branch listening on that token stops pulling new messages from RabbitMQ. The worker then drains its <code>JoinSet</code>, waiting for in-flight tasks to finish writing to Postgres before the process exits. No mid-transaction kills.</p>
+        </div>
+        <div class="numbered-item">
+          <h4>The data backbone - SQLx transaction boundaries</h4>
+          <p>No ORM. Every worker operation that touches Postgres - claim a job, unlock a successor, sweep a session - opens one <code>pool.begin().await</code> and passes <code>&amp;mut tx</code> through every call. Either everything commits, or the connection drops and the entire block rolls back atomically. There's no partial state possible.</p>
+        </div>
+        <div class="numbered-item">
+          <h4>Messaging - Lapin &amp; explicit ACKs</h4>
+          <p>A single <code>lapin::Connection</code> over TCP multiplexes lightweight virtual <code>Channel</code>s. Workers consume with manual acknowledgement - the <code>Delivery</code> object is held in memory until the SQLx transaction commits successfully. Only then does <code>delivery.basic_ack()</code> fire. If the payload is malformed, <code>basic_reject(requeue: false)</code> severs the message and routes it to the dead-letter queue. Nothing is auto-acked, nothing silently disappears.</p>
+        </div>
+        <div class="numbered-item">
+          <h4>Time control - timeouts &amp; intervals</h4>
+          <p>Distributed systems hang before they crash. Every external call is wrapped in <code>tokio::time::timeout</code> - RabbitMQ publishes get a hard 50ms ceiling; if the TCP socket silently drops packets, the future is aborted and an error is returned rather than a hung thread. Polling workers use <code>tokio::time::interval()</code> with <code>MissedTickBehavior::Delay</code> - if a Postgres fetch runs long under load, the worker waits a full fresh interval before querying again. It doesn't try to catch up. That's the pressure release valve.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="folder-structure" class="doc-section">
+      <h2>Folder structure</h2>
+      <pre class="tree-block">project/
+├── .dockerignore
+├── .env.example
+├── .gitignore
+├── Cargo.lock
+├── Cargo.toml
+├── docker-compose.yml
+├── Makefile
+├── README.md
+├── apps/
+│   ├── api/
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── app.rs
+│   │       ├── main.rs
+│   │       └── router.rs
+│   └── worker/
+│       ├── Cargo.toml
+│       └── src/
+│           ├── main.rs
+│           └── registry.rs
+├── crates/
+│   └── core/
+│       ├── Cargo.toml
+│       ├── src/
+│       │   ├── lib.rs
+│       │   ├── messaging/
+│       │   │   ├── mod.rs
+│       │   │   ├── publisher.rs
+│       │   │   └── topology.rs
+│       │   ├── shared/
+│       │   │   ├── config.rs
+│       │   │   ├── error.rs
+│       │   │   ├── extract.rs
+│       │   │   ├── mod.rs
+│       │   │   ├── redis.rs
+│       │   │   ├── state.rs
+│       │   │   └── tracing.rs
+│       │   ├── verification/
+│       │   │   ├── db.rs
+│       │   │   ├── helpers.rs
+│       │   │   ├── http.rs
+│       │   │   ├── mod.rs
+│       │   │   ├── openapi.rs
+│       │   │   ├── service.rs
+│       │   │   └── types.rs
+│       │   └── workers/
+│       │       ├── jitter.rs
+│       │       ├── mod.rs
+│       │       ├── outbox_relay.rs
+│       │       ├── stage_lease_recovery.rs
+│       │       └── stage_processor.rs
+│       └── tests/
+│           ├── integration/
+│           │   ├── db.rs
+│           │   ├── main.rs
+│           │   ├── outbox_relay.rs
+│           │   ├── router.rs
+│           │   ├── service.rs
+│           │   ├── stage_lease_recovery.rs
+│           │   └── stage_processor.rs
+│           ├── support/
+│           │   ├── lease_recovery_harness.rs
+│           │   ├── outbox_relay_harness.rs
+│           │   ├── router_harness.rs
+│           │   └── stage_payload_triage.rs
+│           └── unit/
+│               ├── main.rs
+│               ├── shared_config.rs
+│               ├── shared_error.rs
+│               ├── shared_extract.rs
+│               ├── shared_redis.rs
+│               ├── verification_helpers.rs
+│               ├── verification_http.rs
+│               └── verification_types.rs
+├── migrations/
+│   ├── 001_trigger_updated_at.sql
+│   ├── 002_verification_sessions.sql
+│   ├── 003_verification_stages.sql
+│   ├── 004_outbox_events.sql
+│   ├── 005_stage_processing_lease.sql
+│   ├── 006_stage_processing_lease_recovery_index.sql
+│   └── 007_stage_lease_recovery_count.sql
+├── devops/
+│   ├── Dockerfile.api
+│   ├── Dockerfile.migrations
+│   ├── Dockerfile.test
+│   └── Dockerfile.worker
+└── scripts/
+    └── verification-stress.mjs</pre>
+
+      <div class="thought-block">
+        <h3>Thought process</h3>
+        <h4>One rule - keep business logic in one place</h4>
+        <p>The entire structure is driven by a single architectural decision: <code>crates/core</code> owns everything, <code>apps/</code> owns nothing. The two binaries (api and worker) are deliberately kept dumb - they boot Tokio, wire infrastructure, and delegate. All business rules, SQL, validation, and worker logic live in core. This means you can test the full domain without spinning up an HTTP server, and you can scale the API and workers independently as separate OS processes without duplicating a single line of logic.</p>
+
+        <ul class="meta-list">
+          <li><strong>Root level</strong> The <code>project/</code> folder is the Cargo workspace root. Cargo.toml pins all shared dependency versions once - individual crates just inherit them. docker-compose.yml and Makefile live here so every make and docker compose command resolves paths correctly from this single working directory.</li>
+          <li><strong>apps/ - the two thin binaries</strong> These are the deployable processes. Neither contains business logic. <strong>apps/api/</strong> - Boots Tokio, constructs <code>Arc&lt;AppState&gt;</code>, mounts the Axum router from core, and listens on the configured port. app.rs wires the Tower middleware stack; router.rs maps URL paths to handlers defined in core. <strong>apps/worker/</strong> - Boots Tokio, constructs <code>Arc&lt;AppState&gt;</code>, and starts the three background workers registered in registry.rs. Nothing else.</li>
+          <li><strong>crates/core/src/ - the brain</strong> Everything domain-critical lives here, organized by concern.
+            <ul class="bullets nested-detail">
+              <li><strong>shared/</strong> - Cross-cutting infrastructure: <strong>config.rs</strong> - typed AppConfig from env via envy. <strong>state.rs</strong> - <code>Arc&lt;AppState&gt;</code> with pool, Redis, AMQP, config. <strong>error.rs</strong> - central AppError; all errors convert here before HTTP responses. <strong>extract.rs</strong> - ValidatedJson extractor. <strong>redis.rs</strong> - Redis wiring and idempotency helpers. <strong>tracing.rs</strong> - subscriber init; JSON in prod, pretty locally.</li>
+              <li><strong>verification/</strong> - Vertical slice: <strong>http.rs</strong> - Axum handlers and DTOs (edge only). <strong>service.rs</strong> - orchestration; db + messaging; business rules. <strong>db.rs</strong> - raw SQLx on <code>&amp;PgPool</code> or <code>&amp;mut Transaction</code>. <strong>types.rs</strong> - VerificationSession, StageStatus, etc. <strong>helpers.rs</strong> - pure in-slice functions. <strong>openapi.rs</strong> - Utoipa schemas for compile-time OpenAPI.</li>
+              <li><strong>messaging/</strong> - RabbitMQ isolated; slices call <code>publish_stage_event(...)</code> etc. - no scattered routing keys. <strong>topology.rs</strong> - exchanges and queues in one place. <strong>publisher.rs</strong> - typed publish for service and workers.</li>
+              <li><strong>workers/</strong> - <strong>outbox_relay.rs</strong> - poll <code>outbox_events</code>, publish to RabbitMQ. <strong>stage_processor.rs</strong> - consume, drive stage transitions in Postgres. <strong>stage_lease_recovery.rs</strong> - zombie jobs, out-of-band reset. <strong>jitter.rs</strong> - shared retry jitter.</li>
+            </ul>
+          </li>
+          <li><strong>crates/core/tests/</strong> <strong>unit/</strong> - Pure logic: config, errors, extractor, types - no I/O. <strong>integration/</strong> - E2E against real Postgres, Redis, and RabbitMQ; one file per slice. <strong>support/</strong> - harnesses and fixtures shared by integration tests.</li>
+          <li><strong>migrations/</strong> Ordered, append-only. Applied once by <code>sqlx migrate run</code>. Sequence: sessions → stages → outbox → lease → recovery index. Never edited after apply.</li>
+          <li><strong>devops/</strong> One Dockerfile per process (api, worker, migrations, test). Each image purpose-built and minimal.</li>
+          <li><strong>scripts/</strong> <code>verification-stress.mjs</code> - parallel sessions, CSV reports; tooling, not app code.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="data-architecture" class="doc-section">
+      <h2>Data architecture</h2>
+
+      <figure class="diagram-showcase">
+        <div class="diagram-frame">
+          <img src="https://drive.google.com/thumbnail?id=1uhryRJCLDpSeHEVLx9H1-8CVZbSzPURv&amp;sz=w2000" width="1200" height="675" alt="ERD diagram preview" loading="lazy" referrerpolicy="no-referrer">
+          <div class="diagram-overlay">
+            <p class="diagram-hint">Preview - opens full diagram in Google Drive</p>
+            <a class="diagram-view-btn" href="https://drive.google.com/file/d/1uhryRJCLDpSeHEVLx9H1-8CVZbSzPURv/view?usp=drive_link" target="_blank" rel="noopener noreferrer">Click to view</a>
+          </div>
+        </div>
+        <figcaption class="diagram-caption">ERD diagram (Google Drive)</figcaption>
+      </figure>
+
+      <h3><code>verification_sessions</code> table</h3>
+      <p>Tracks the top-level lifecycle of a verification attempt. UUID primary key prevents enumeration. <code>status</code> is the terminal state machine: ACTIVE, COMPLETED, or FAILED. <code>completed_at</code> and <code>failed_at</code> are separate nullable columns - not a single <code>ended_at</code> - because how it ended matters. <code>updated_at</code> is trigger-managed, always accurate. <code>idx_sessions_status</code> covers any sweep filtering by status.</p>
+
+      <h3><code>verification_stages</code> table</h3>
+      <p>One row per verification step (1-5) within a session. <code>ON DELETE CASCADE</code> means session deletion cleans up all stages automatically. <code>stage</code> is a SMALLINT - smaller, faster index lookups. Status follows LOCKED → PENDING → PROCESSING → COMPLETED | FAILED.</p>
+      <p><code>input_data</code> is written once by the API, never touched again. <code>response_data</code> is written only by the worker on completion. Two writers, two columns - the audit trail is structurally immutable. <code>retry_count</code> and <code>error</code> track failure history; <code>error</code> is cleared on a successful retry.</p>
+      <p><code>expires_at</code> turns a job claim into a timed lease. A crashed worker pod can't leave a stage stuck in PROCESSING forever - the timestamp expires and the recovery worker reclaims it. <code>lease_recovery_count</code> prevents infinite recovery loops on top of that - a toxic payload that crashes the worker every time would be reset to PENDING forever without it; once it hits the configured limit, the stage is permanently FAILED and abandoned.</p>
+      <p><code>uq_session_stage</code> makes duplicate stage rows physically impossible. <code>chk_valid_stage</code> rejects out-of-range values at the DB level regardless of what the application sends.</p>
+      <p>Three indexes: <code>idx_stages_polling</code> - partial on PENDING/PROCESSING only, so worker polling never scans completed rows. <code>idx_stages_session</code> - covers the sweep query reading all stages for a given session. <code>idx_stages_processing_expires_at</code> - partial on PROCESSING rows with a non-null <code>expires_at</code>, so expired lease lookups by the recovery worker are always an index scan, never a table scan.</p>
+
+      <h3><code>outbox_events</code> table</h3>
+      <p>The transactional outbox bridge between Postgres and RabbitMQ. Stores exchange, routing_key, and payload (JSONB including the worker's idempotency <code>event_id</code>). Rows are hard-deleted after the relay gets an AMQP ack - never updated, not an audit log, designed to stay near-empty. <code>idx_outbox_polling</code> on <code>created_at ASC</code> keeps oldest-first polling instant even during traffic spikes.</p>
+
+      <h3>UUIDv4 over BIGSERIAL - why</h3>
+      <p>Sequential integers are fine for simple CRUD apps. For a distributed KYC engine handling sensitive identity data, they're a security flaw.</p>
+      <ul class="bullets">
+        <li><strong>IDOR immunity.</strong> With id = 100, a malicious script trivially guesses id = 101 and scrapes other users' verification states. UUIDv4 carries 122 bits of entropy - guessing one is not computationally feasible. The ID itself is a security layer.</li>
+        <li><strong>Bearer token model.</strong> The verification tables store no user_id - the session UUID is the credential. The client holds it, presents it, and the engine trusts it. For a URL parameter to function as a bearer token, it must be unguessable by definition.</li>
+        <li><strong>No database round-trips for ID generation.</strong> Sequential IDs require a round-trip to claim the next value from a locked database sequence - a concurrency bottleneck at high throughput. UUIDs are generated entirely in memory: <code>Uuid::new_v4()</code> in Rust, inline, with no DB interaction. Multi-stage transactions don't stall waiting for an ID to come back.</li>
+        <li><strong>Distributed uniqueness.</strong> The transactional outbox relays events across workers and pods. Sequential IDs from two database shards would collide - both would produce id = 5. A UUIDv4 generated in Pod A will never collide with one generated in Pod B, ever.</li>
+      </ul>
+      <div class="callout">
+        <p><strong>The trade-off.</strong> 16 bytes versus 8 bytes for a BIGINT, and B-tree indexes on random UUIDs fragment slightly more. That cost is accepted - a few extra megabytes of storage in exchange for IDOR immunity, stateless ID generation, and collision-free distributed operation.</p>
+      </div>
+    </section>
+
+    <section id="message-queue" class="doc-section">
+      <h2>Message queue architecture</h2>
+      <h3>Foundation: three tiers, one rule - no message is ever lost</h3>
+      <figure class="diagram-showcase">
+        <div class="diagram-frame">
+          <img src="https://drive.google.com/thumbnail?id=1SaN5fN6bG0kAUaRrbzjPndB2RODsbhln&amp;sz=w2000" width="1200" height="675" alt="Message queue topology diagram preview" loading="lazy" referrerpolicy="no-referrer">
+          <div class="diagram-overlay">
+            <p class="diagram-hint">Preview - opens full diagram in Google Drive</p>
+            <a class="diagram-view-btn" href="https://drive.google.com/file/d/1SaN5fN6bG0kAUaRrbzjPndB2RODsbhln/view?usp=drive_link" target="_blank" rel="noopener noreferrer">Click to view</a>
+          </div>
+        </div>
+        <figcaption class="diagram-caption">Queue topology diagram (Google Drive)</figcaption>
+      </figure>
+      <p class="lead">Every message in this system has exactly three possible fates: it succeeds, it retries, or it lands in a graveyard for human inspection. There is no fourth option where it silently disappears.</p>
+
+      <h4>The publishers</h4>
+      <ul class="bullets">
+        <li>Messages are published with delivery mode 2 - persistent. RabbitMQ writes them to disk before acknowledging. A broker crash or restart does not lose in-flight messages.</li>
+        <li>Publishing uses a double-await pattern. The first await sends the bytes over TCP. The second await blocks until RabbitMQ sends back an explicit confirmation that the message has been safely received. No fire-and-forget, no silent data loss.</li>
+        <li>When a failed message is moved to the retry queue, the existing <code>x-death</code> headers are preserved and carried forward. These headers track how many times a message has failed across the entire system - without them, the worker has no way to enforce a max-retry limit.</li>
+        <li>The payload itself is kept deliberately minimal - just UUIDs and a stage number. No PII, no full database rows. If the worker needs more context, it queries Postgres using those IDs. This keeps queues lightweight and eliminates the class of bugs where a worker acts on stale data embedded in a message.</li>
+      </ul>
+
+      <h4>The three-tier topology</h4>
+      <p>The topology is declared idempotently on every boot. If the exchanges and queues already exist, RabbitMQ ignores the declarations. If they don't, it creates them. The infrastructure heals itself automatically - no manual setup required after a fresh environment.</p>
+      <p>All exchanges use Direct routing - one message, one consumer. No fanout, no broadcast.</p>
+
+      <div class="tier-grid">
+        <div class="tier-card">
+          <h4>Tier 1 - Main queue</h4>
+          <p>Where active jobs live. Workers consume from here. When a worker hits max retries and calls <code>basic_reject(requeue=false)</code>, RabbitMQ doesn't drop the message - the <code>x-dead-letter-exchange</code> configuration automatically routes it to the terminal exchange instead.</p>
+        </div>
+        <div class="tier-card">
+          <h4>Tier 2 - Wait queue</h4>
+          <p>The sleep queue. No workers consume from it. Failed messages that haven't yet hit the retry limit land here and sit for exactly 30 seconds via <code>x-message-ttl</code>. When the TTL expires, RabbitMQ itself routes the message back to the main queue using the configured dead-letter exchange and routing key. Fully infrastructure-driven retry backoff - no sleep timers, no scheduled tasks, no Rust code involved.</p>
+        </div>
+        <div class="tier-card">
+          <h4>Tier 3 - Dead queue</h4>
+          <p>The graveyard. No TTL, no workers, no automatic routing. Poison messages - ones that crash the worker every time, or ones rejected after hitting the retry ceiling - land here permanently. A human engineer can inspect them in the RabbitMQ management UI, diagnose the root cause, fix the bug, and manually shovel them back to the main queue when ready.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p><a href="application-stack.html">Previous</a> · <a href="index.html">Home</a> · <a href="execution.html">Next: Execution</a></p>
+  </footer>
+</body>
+</html>

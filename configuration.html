@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Configuration - Technical documentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;600&family=JetBrains+Mono:wght@400;500;600&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="chapter-nav" aria-label="Documentation sections">
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="application-stack.html">Application stack</a></li>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="execution.html">Execution</a></li>
+      <li><a href="performance-decisions.html">Performance</a></li>
+      <li><a href="configuration.html" aria-current="page">Configuration</a></li>
+      <li><a href="tracing-and-observability.html">Tracing</a></li>
+      <li><a href="testing.html">Testing</a></li>
+      <li><a href="security.html">Security</a></li>
+      <li><a href="devops.html">DevOps</a></li>
+    </ul>
+  </nav>
+
+  <header class="site-header">
+    <h1 class="page-header-title">Environment variables</h1>
+    <p class="page-header-desc">What they control and why they're tunable.</p>
+  </header>
+
+  <nav class="toc" aria-label="On this page">
+    <h2>Contents</h2>
+    <ul>
+      <li><a href="#runtime">Runtime</a></li>
+      <li><a href="#postgres">PostgreSQL - Main Pool</a></li>
+      <li><a href="#relay">Outbox relay</a></li>
+      <li><a href="#processor">Stage processor</a></li>
+      <li><a href="#recovery">Lease recovery</a></li>
+      <li><a href="#infrastructure">Infrastructure</a></li>
+    </ul>
+  </nav>
+
+  <main>
+    <section id="runtime" class="doc-section config-block">
+      <h2>Runtime</h2>
+      <ul>
+        <li><code>ENVIRONMENT</code> - Switches log format. <code>local</code> gives readable pretty logs; anything else outputs compact JSON for log pipelines. Don't run <code>local</code> in production - it's verbose and expensive to ingest.</li>
+        <li><code>SERVER_PORT</code> - TCP port the API binds to. Exists so infrastructure can remap ports without touching code.</li>
+        <li><code>RATE_LIMIT_REQUESTS_PER_MIN</code> - Per-IP request cap enforced in memory. <strong class="config-up">Increase</strong> during expected traffic spikes to reduce false 429s. <strong class="config-down">Decrease</strong> during an active attack to throttle an abusive IP faster.</li>
+        <li><code>CORS_ALLOWED_ORIGINS</code> - Empty disables CORS entirely. Populated values are parsed at boot - a typo crashes the app immediately rather than silently breaking browser traffic in production.</li>
+      </ul>
+    </section>
+
+    <section id="postgres" class="doc-section config-block">
+      <h2>PostgreSQL - Main Pool</h2>
+      <ul>
+        <li><code>DB_POOL_MIN / MAX</code> - Min keeps warm connections ready; max caps total connections from this process. With 50 API pods at max 20, you're using 1,000 connections - that hits Postgres's global limit fast. <strong class="config-up">Increase</strong> max for more parallelism; <strong class="config-down">Decrease</strong> if running many replicas against one DB.</li>
+        <li><code>DB_POOL_ACQUIRE_MS</code> - How long a request waits for a free connection before returning a 500. Too high and requests pile up in RAM until the pod OOMs. Too low and you get premature 500s under short spikes.</li>
+        <li><code>DB_POOL_IDLE_MS</code> - How long idle connections are kept before being closed. <strong class="config-up">Increase</strong> to reduce reconnect churn; <strong class="config-down">Decrease</strong> to release Postgres sessions faster on quiet nodes.</li>
+      </ul>
+    </section>
+
+    <section id="relay" class="doc-section config-block">
+      <h2>Outbox relay</h2>
+      <ul>
+        <li><code>RELAY_DB_POOL_MIN / MAX</code> - Completely isolated from the main pool. A hung RabbitMQ connection can only exhaust these 5 - the API and processors keep running. <strong class="config-up">Increase</strong> if the relay needs more parallel throughput; <strong class="config-down">Decrease</strong> to minimize relay's footprint.</li>
+        <li><code>OUTBOX_RELAY_BATCH_LIMIT</code> - Rows claimed per relay transaction. <strong class="config-up">Increase</strong> to clear backlogs faster with fewer round-trips. <strong class="config-down">Decrease</strong> to shorten how long row locks are held per cycle.</li>
+        <li><code>OUTBOX_RELAY_PUBLISH_TIMEOUT_MS</code> - Hard timeout per RabbitMQ publish. The relay holds Postgres row locks while publishing - a hung broker would freeze those locks indefinitely without this. <strong class="config-up">Increase</strong> to tolerate slower brokers; <strong class="config-down">Decrease</strong> to release locks faster on bad networks.</li>
+        <li><code>OUTBOX_RELAY_IDLE_POLL_MS</code> - Sleep duration when the outbox is empty. <strong class="config-up">Increase</strong> to stop idle polling from burning DB CPU. <strong class="config-down">Decrease</strong> if you need lower latency picking up new events.</li>
+      </ul>
+    </section>
+
+    <section id="processor" class="doc-section config-block">
+      <h2>Stage processor</h2>
+      <ul>
+        <li><code>PROCESSING_LEASE_BUFFER_SECS</code> - Added to the calculated work time to set <code>expires_at</code>. <strong class="config-up">Increase</strong> to prevent the recovery worker from stealing jobs that are still legitimately running. <strong class="config-down">Decrease</strong> and leases expire prematurely, causing unnecessary recoveries.</li>
+        <li><code>STAGE_SIMULATED_WORK_SECS_MIN / MAX</code> - Local testing knobs only. Set both to 1-5 seconds for fast end-to-end runs. Leave high to stress-test lease and retry behavior.</li>
+        <li><code>STAGE_PROCESSING_MAX_RETRIES</code> - Controls three things: RabbitMQ retry routing, DB retry count, and lease recovery quarantine. <strong class="config-up">Increase</strong> to give more attempts before permanent failure. <strong class="config-down">Decrease</strong> to quarantine bad jobs sooner.</li>
+        <li><code>STAGE_PROCESSOR_QOS_PREFETCH</code> - How many unacked messages RabbitMQ pushes to the worker at once. <strong class="config-up">Increase</strong> for higher throughput. <strong class="config-down">Decrease</strong> to reduce memory pressure and DB concurrency per pod.</li>
+        <li><code>STAGE_PROCESSOR_SHUTDOWN_GRACE_MS</code> - Time given to in-flight jobs on <code>SIGTERM</code>. <strong class="config-up">Increase</strong> if jobs regularly need more time to finish writes. <strong class="config-down">Decrease</strong> for faster pod shutdown at the cost of more mid-job nacks.</li>
+        <li><code>WORKER_DB_TIMEOUT_MS</code> - Max time for a DB operation inside the worker. <strong class="config-up">Increase</strong> if legitimate transactions are being cut off. <strong class="config-down">Decrease</strong> to surface hung SQL faster.</li>
+      </ul>
+    </section>
+
+    <section id="recovery" class="doc-section config-block">
+      <h2>Lease recovery</h2>
+      <ul>
+        <li><code>STAGE_LEASE_RECOVERY_POLL_MS</code> - How often the recovery worker scans for expired leases. <strong class="config-up">Increase</strong> to reduce DB load when the system is healthy. <strong class="config-down">Decrease</strong> to detect crashed jobs faster.</li>
+        <li><code>STAGE_LEASE_RECOVERY_BATCH_LIMIT</code> - Recovery rows per transaction. <strong class="config-up">Increase</strong> to clear a mass failure faster with fewer transactions. <strong class="config-down">Decrease</strong> to keep lock contention low under recovery.</li>
+        <li><code>WORKER_START_JITTER_MAX_MS</code> - Random delay before first poll on boot. <strong class="config-up">Increase</strong> to spread load across more pods. Set to 0 to remove jitter entirely for predictable cold starts.</li>
+      </ul>
+    </section>
+
+    <section id="infrastructure" class="doc-section config-block">
+      <h2>Infrastructure</h2>
+      <ul>
+        <li><code>AMQP_URL / REDIS_URL / API_KEY</code> - No defaults. Missing values crash the app at boot - intentionally. Silent misconfiguration in production is worse than a loud startup failure.</li>
+        <li><code>IDEMPOTENCY_TTL_SECS</code> - How long a session-start idempotency key lives in Redis. <strong class="config-up">Increase</strong> to extend the safe client retry window. <strong class="config-down">Decrease</strong> to expire keys sooner and reduce Redis memory usage.</li>
+        <li><code>RUST_LOG</code> - Log verbosity dial. <code>info</code> keeps costs down. Inject <code>debug</code> or <code>trace</code> per crate for deep troubleshooting without redeployment.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p><a href="performance-decisions.html">Previous</a> · <a href="index.html">Home</a> · <a href="tracing-and-observability.html">Next: Tracing</a></p>
+  </footer>
+</body>
+</html>

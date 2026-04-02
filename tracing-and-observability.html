@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tracing &amp; observability - Technical documentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;600&family=JetBrains+Mono:wght@400;500;600&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="chapter-nav" aria-label="Documentation sections">
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="application-stack.html">Application stack</a></li>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="execution.html">Execution</a></li>
+      <li><a href="performance-decisions.html">Performance</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+      <li><a href="tracing-and-observability.html" aria-current="page">Tracing</a></li>
+      <li><a href="testing.html">Testing</a></li>
+      <li><a href="security.html">Security</a></li>
+      <li><a href="devops.html">DevOps</a></li>
+    </ul>
+  </nav>
+
+  <header class="site-header">
+    <h1 class="page-header-title">Tracing &amp; observability</h1>
+    <p class="page-header-desc">Spans, trace IDs, worker instrumentation, and debug gating.</p>
+  </header>
+
+  <nav class="toc" aria-label="On this page">
+    <h2>Contents</h2>
+    <ul>
+      <li><a href="#boot">Boot setup</a></li>
+      <li><a href="#spans">Spans over log lines</a></li>
+      <li><a href="#trace-id">trace_id on API errors</a></li>
+      <li><a href="#worker-spans">Worker spans</a></li>
+      <li><a href="#recording">Field recording</a></li>
+      <li><a href="#debug">Debug gate</a></li>
+    </ul>
+  </nav>
+
+  <main>
+    <section id="boot" class="doc-section">
+      <h2>Boot setup</h2>
+      <p>Both the API and worker call one initialization function at startup. Log level is controlled by <code>RUST_LOG</code> - defaults to <code>info</code> in production to keep log volume and cost low. Injecting <code>RUST_LOG=info,app_core=debug</code> at runtime enables deep traces for a specific crate without redeployment.</p>
+      <p>Log format switches on environment. Local gets human-readable output with file names and line numbers - click a log line, jump to the code. Production gets compact JSON - lower CPU overhead, easy for log aggregators to parse.</p>
+    </section>
+
+    <section id="spans" class="doc-section">
+      <h2>Spans over log lines</h2>
+      <p>Everything is structured around spans, not individual log statements. A span covers a duration and carries context - <code>session_id</code>, <code>stage</code>, <code>outbox_id</code>. Every log event emitted inside a span automatically inherits that context. You don't pass variables through every function call; the span carries them.</p>
+    </section>
+
+    <section id="trace-id" class="doc-section">
+      <h2><code>trace_id</code> on every API error</h2>
+      <p>Tower's trace middleware stamps a unique 16-character hex ID on every HTTP request. When the API returns a 4xx or 5xx, that ID is injected directly into the JSON error response. A customer pastes that ID into the log search and the exact database query, validation failure, and stack trace for their specific request appears instantly. No reproduction steps needed.</p>
+    </section>
+
+    <section id="worker-spans" class="doc-section">
+      <h2>Worker spans built manually</h2>
+      <p>Workers have no incoming HTTP request, so spans are constructed explicitly. The outbox relay extracts <code>session_id</code> and <code>stage</code> from the payload before publishing and attaches them to the span - a failed publish log reads "failed to publish Stage 2 for Session XYZ", not just "publish failed."</p>
+      <p>The stage processor uses <code>.instrument(span)</code> on each async task in the <code>JoinSet</code>. Standard span entry would bleed log context across concurrently running jobs sharing the same thread. <code>.instrument()</code> binds the span to the specific future, not the thread - Job A's logs never mix with Job B's.</p>
+    </section>
+
+    <section id="recording" class="doc-section">
+      <h2>Surgical field recording</h2>
+      <p>Instead of logging generic completion messages, specific counts are recorded directly onto the span - recovered jobs, permanently failed jobs. Log aggregators can graph these fields in real time without custom parsing rules.</p>
+    </section>
+
+    <section id="debug" class="doc-section">
+      <h2>Debug gate</h2>
+      <p>Expensive log operations - like printing a list of all published outbox IDs - are gated behind <code>tracing::enabled!(Level::DEBUG)</code>. At <code>info</code> level, that code path is never evaluated. Debug detail is available when needed without paying the cost in production.</p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p><a href="configuration.html">Previous</a> · <a href="index.html">Home</a> · <a href="testing.html">Next: Testing</a></p>
+  </footer>
+</body>
+</html>
