@@ -5,6 +5,7 @@
   const MAX_RESULTS = 75;
   const HIGHLIGHT_MS = 5200;
   const HIGHLIGHT_STORAGE_KEY = "doc-search-highlight";
+  const SEARCH_RESTORE_KEY = "doc-search-restore";
   const INDEX_URL = new URL("search-index.json", window.location.href).href;
 
   /** Skipped for matching so questions and filler don't block results */
@@ -233,7 +234,7 @@
       const data = JSON.parse(raw);
       if (!data || !data.id) return;
       const here = currentPageFile();
-      if (data.page && data.page !== here) return;
+      if (data.page && !isSameDocPage(data.page, here)) return;
       const run = () => scheduleHighlight(data.id, data.query || "");
       requestAnimationFrame(() => requestAnimationFrame(run));
     } catch (_) {}
@@ -351,6 +352,16 @@
     return { page: page || "", hash: frag ? `#${frag}` : "" };
   }
 
+  function htmlBaseName(file) {
+    const seg = String(file).split("/").pop() || "";
+    const noExt = seg.replace(/\.html?$/i, "");
+    return (noExt || "index").toLowerCase();
+  }
+
+  function isSameDocPage(anchorPage, locationFile) {
+    return htmlBaseName(anchorPage) === htmlBaseName(locationFile);
+  }
+
   function getSearchQuery() {
     return ((overlayInput && overlayInput.value) || "").trim();
   }
@@ -361,7 +372,7 @@
     const { page, hash } = parseAnchor(item.anchor);
     const here = currentPageFile();
     const id = hash.replace(/^#/, "");
-    if (page && page === here) {
+    if (page && isSameDocPage(page, here)) {
       window.location.hash = id || "";
       const afterScroll = () => {
         const el = id ? document.getElementById(id) : null;
@@ -379,9 +390,41 @@
           );
         } catch (_) {}
       }
+      if (q) {
+        try {
+          sessionStorage.setItem(
+            SEARCH_RESTORE_KEY,
+            JSON.stringify({ query: q, matchIndex }),
+          );
+        } catch (_) {}
+      }
       if (close) closeOverlay();
       window.location.href = item.anchor;
     }
+  }
+
+  function consumePendingSearchRestore() {
+    try {
+      const raw = sessionStorage.getItem(SEARCH_RESTORE_KEY);
+      if (!raw) return;
+      sessionStorage.removeItem(SEARCH_RESTORE_KEY);
+      const data = JSON.parse(raw);
+      if (!data || typeof data.query !== "string" || !data.query.trim()) return;
+      if (!overlayEl || !overlayInput) return;
+      const idx = typeof data.matchIndex === "number" ? data.matchIndex : 0;
+      overlayInput.value = data.query.trim();
+      if (homeInput) homeInput.value = overlayInput.value;
+      overlayEl.hidden = false;
+      document.body.classList.add("doc-search-open");
+      loadIndex().then((indexData) => {
+        const next = searchItems(indexData.items || [], data.query);
+        matches = next;
+        matchIndex =
+          matches.length === 0 ? 0 : Math.min(Math.max(0, idx), matches.length - 1);
+        updateNavUi();
+        overlayInput && overlayInput.focus();
+      });
+    } catch (_) {}
   }
 
   function breadcrumb(it) {
@@ -471,7 +514,8 @@
     if (has && go) {
       const it = matches[matchIndex];
       const { page } = parseAnchor(it.anchor);
-      go.textContent = page && page === currentPageFile() ? "Jump here" : "Open page";
+      go.textContent =
+        page && isSameDocPage(page, currentPageFile()) ? "Jump here" : "Open page";
     }
     renderResults();
   }
@@ -568,11 +612,32 @@
     overlayEl = root;
     overlayInput = root.querySelector("[data-doc-search-input]");
 
-    root.querySelector("[data-doc-search-backdrop]")?.addEventListener("click", closeOverlay);
-    root.querySelector("[data-doc-search-close]")?.addEventListener("click", closeOverlay);
-    root.querySelector("[data-doc-search-prev]")?.addEventListener("click", goPrev);
-    root.querySelector("[data-doc-search-next]")?.addEventListener("click", goNext);
-    root.querySelector("[data-doc-search-go]")?.addEventListener("click", goCurrent);
+    const backdrop = root.querySelector("[data-doc-search-backdrop]");
+    const panel = root.querySelector(".doc-search-panel");
+    backdrop?.addEventListener("click", (e) => {
+      if (e.target === backdrop) closeOverlay();
+    });
+    panel?.addEventListener("click", (e) => e.stopPropagation());
+
+    root.querySelector("[data-doc-search-close]")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeOverlay();
+    });
+    root.querySelector("[data-doc-search-prev]")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      goPrev();
+    });
+    root.querySelector("[data-doc-search-next]")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      goNext();
+    });
+    root.querySelector("[data-doc-search-go]")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      goCurrent();
+    });
 
     overlayInput?.addEventListener("input", () => {
       syncHomeFromOverlay();
@@ -663,6 +728,7 @@
     if (isHome()) buildHomeBar();
     else buildFab();
     consumePendingHighlight();
+    consumePendingSearchRestore();
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
