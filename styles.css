@@ -1234,9 +1234,11 @@ body:not(.hub-home) {
 .doc-search-input {
   flex: 1 1 12rem;
   min-width: 0;
+  min-height: 0;
   padding: 0.55rem 0.85rem;
   font-family: var(--font-body);
   font-size: 1rem;
+  line-height: 1.35;
   color: var(--text);
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -1476,7 +1478,23 @@ mark.doc-search-hit {
     align-items: stretch;
   }
 
+  /* Row uses flex-grow:1 — in a column that stretches the input vertically */
+  .doc-search-input {
+    flex: 0 0 auto;
+    width: 100%;
+    box-sizing: border-box;
+    max-height: 2.85rem;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+
   .doc-search-actions {
     justify-content: space-between;
+  }
+
+  .doc-search-home-input {
+    font-size: 0.95rem;
+    line-height: 1.35;
+    max-height: 2.85rem;
   }
 }

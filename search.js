@@ -7,6 +7,138 @@
   const HIGHLIGHT_STORAGE_KEY = "doc-search-highlight";
   const INDEX_URL = new URL("search-index.json", window.location.href).href;
 
+  /** Skipped for matching so questions and filler don't block results */
+  const STOP_WORDS = new Set([
+    "a",
+    "an",
+    "the",
+    "and",
+    "or",
+    "but",
+    "if",
+    "so",
+    "as",
+    "at",
+    "by",
+    "for",
+    "in",
+    "of",
+    "on",
+    "to",
+    "from",
+    "with",
+    "into",
+    "through",
+    "during",
+    "before",
+    "after",
+    "above",
+    "below",
+    "between",
+    "under",
+    "against",
+    "about",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "having",
+    "do",
+    "does",
+    "did",
+    "doing",
+    "done",
+    "will",
+    "would",
+    "could",
+    "should",
+    "may",
+    "might",
+    "must",
+    "shall",
+    "can",
+    "need",
+    "ought",
+    "it",
+    "its",
+    "this",
+    "that",
+    "these",
+    "those",
+    "i",
+    "me",
+    "my",
+    "we",
+    "us",
+    "our",
+    "you",
+    "your",
+    "he",
+    "him",
+    "his",
+    "she",
+    "her",
+    "hers",
+    "they",
+    "them",
+    "their",
+    "what",
+    "which",
+    "who",
+    "whom",
+    "whose",
+    "where",
+    "when",
+    "why",
+    "how",
+    "all",
+    "any",
+    "both",
+    "each",
+    "few",
+    "more",
+    "most",
+    "other",
+    "some",
+    "such",
+    "no",
+    "nor",
+    "not",
+    "only",
+    "own",
+    "same",
+    "than",
+    "too",
+    "very",
+    "just",
+    "also",
+    "again",
+    "further",
+    "then",
+    "once",
+    "here",
+    "there",
+    "because",
+    "while",
+    "although",
+    "unless",
+    "until",
+    "whether",
+    "either",
+    "neither",
+    "let",
+    "like",
+    "upon",
+    "within",
+    "without",
+  ]);
+
   let highlightClearTimer = 0;
 
   function escapeRegExp(s) {
@@ -14,10 +146,9 @@
   }
 
   function highlightTermsForQuery(query) {
-    const phrase = query.trim();
-    const words = tokenize(query).map((w) => w.toLowerCase());
+    const { words, phrase } = searchTokens(query);
     const terms = [];
-    if (phrase.length >= 2) terms.push(phrase.toLowerCase());
+    if (phrase.length >= 2) terms.push(phrase);
     for (const w of words) {
       if (w.length >= 1) terms.push(w);
     }
@@ -166,6 +297,16 @@
       .filter((w) => w.length > 0);
   }
 
+  /** Words used for AND match + phrase bonus; strips stop words, falls back if nothing left */
+  function searchTokens(queryRaw) {
+    const all = tokenize(queryRaw);
+    if (all.length === 0) return { words: [], phrase: "" };
+    const stripped = all.filter((w) => !STOP_WORDS.has(w));
+    const words = stripped.length > 0 ? stripped : all;
+    const phrase = words.join(" ");
+    return { words, phrase };
+  }
+
   function scoreItem(item, words, phrase) {
     const text = item.searchText;
     if (!text || words.length === 0) return 0;
@@ -194,8 +335,7 @@
   }
 
   function searchItems(items, queryRaw) {
-    const phrase = queryRaw.toLowerCase().trim();
-    const words = tokenize(queryRaw);
+    const { words, phrase } = searchTokens(queryRaw);
     if (words.length === 0) return [];
     const scored = [];
     for (const item of items) {
