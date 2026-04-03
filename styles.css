@@ -606,6 +606,35 @@ main {
   color: var(--text);
 }
 
+.bullets li > p {
+  margin: 0;
+}
+
+.bullets li > p + p {
+  margin-top: 0.4rem;
+}
+
+.bullets li > strong:first-child + p {
+  margin-top: 0.35rem;
+}
+
+.topology-node p + p,
+.numbered-item p + p,
+.tier-card p + p,
+.exec-block p + p {
+  margin-top: 0.45rem;
+}
+
+.meta-list li > p,
+.bullets.nested-detail li > p {
+  margin: 0;
+}
+
+.meta-list li > p + p,
+.bullets.nested-detail li > p + p {
+  margin-top: 0.4rem;
+}
+
 .callout {
   background: var(--bg-elevated);
   border-left: 3px solid var(--accent);
@@ -616,6 +645,10 @@ main {
 
 .callout p:last-child {
   margin-bottom: 0;
+}
+
+.callout p + p {
+  margin-top: 0.45rem;
 }
 
 .worker-cards {
