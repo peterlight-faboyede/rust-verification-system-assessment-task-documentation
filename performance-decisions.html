@@ -80,6 +80,20 @@
     <section id="transactions" class="doc-section">
       <h2>Transaction flows - performance decisions and tradeoffs</h2>
 
+      <h3>What <code>SKIP LOCKED</code> achieves in the outbox relay</h3>
+      <div class="perf-mechanism-rationale">
+        <p class="perf-mechanism-rationale-lead"><strong>Firstly, without <code>SKIP LOCKED</code>, parallel workers become a single-file line at the database.</strong></p>
+        <p>Multiple workers polling the same table would <span class="doc-problem">block each other</span>. Worker A locks a row; Worker B tries to read the same row and waits — held at the database level until Worker A releases the lock. Under high concurrency that turns into <span class="doc-problem">a queue of workers stacking up behind each other, serializing what should be parallel work</span>.</p>
+        <p><strong class="perf-gain-head"><code>SKIP LOCKED</code> flips that behavior.</strong> <span class="perf-gain-detail">Instead of waiting, a worker skips rows that are already locked and moves to the next available one.</span> Two workers polling at once get different rows with no coordination. Ten workers get ten different batches. A hundred pods never touch the same row. The table acts as a self-distributing work queue — Postgres partitions work through row-level locking alone.</p>
+        <p><strong class="perf-gain-head">That is why both the Outbox Relay and the Lease Recovery Worker scale horizontally.</strong> <span class="perf-gain-detail">Add pods and throughput tracks linearly: each pod works on rows no other pod is touching.</span></p>
+      </div>
+
+      <h4>The tradeoffs</h4>
+      <p><strong class="perf-tradeoff-head">No ordering guarantee.</strong> <span class="perf-tradeoff-detail"><code>SKIP LOCKED</code> does not promise insertion order. If Worker A holds row 1, Worker B skips it and takes row 2 — row 2 can finish first. For the outbox that is usually fine: the ordered index on <code>created_at</code> biases work toward oldest-first, but strict FIFO is not enforced.</span></p>
+      <p><strong class="perf-tradeoff-head">At-least-once, not exactly-once.</strong> <span class="perf-tradeoff-detail">If a worker reads a row, publishes it, then crashes before deleting it, the next worker will pick the row up again. The design assumes that — idempotency keys on the consumer absorb duplicates.</span> <span class="doc-problem">Duplicates still happen; the system tolerates them, it does not erase them.</span></p>
+      <p><strong class="perf-tradeoff-head">Locks for the whole transaction.</strong> <span class="perf-tradeoff-detail">While a worker is publishing to RabbitMQ it still holds the Postgres row lock.</span> <span class="doc-problem">A slow or hung publish keeps those rows unavailable to every other worker until the transaction ends.</span> <strong class="perf-gain-head">That is why the 50ms publish timeout exists</strong> <span class="perf-gain-detail">- it caps how long a stalled connection can hoard locks.</span></p>
+      <p><strong class="perf-tradeoff-head">Invisible rows under heavy contention.</strong> <span class="perf-tradeoff-detail">If every row in a candidate batch is already locked, <code>SKIP LOCKED</code> returns an empty set instead of waiting. A worker may poll, find nothing, and sleep even though work still sits in the table — momentarily claimed by others.</span> <em class="perf-note">Expected behavior, not a bug; under extreme contention throughput is not perfectly linear.</em></p>
+
       <h3>Session creation - one transaction, bulk insert</h3>
       <p>The session row and all five stage rows are written in one transaction using <code>unnest</code> (one SQL statement vs five round-trips). <strong class="perf-gain-head">Performance gain</strong> <span class="perf-gain-detail">- one network round-trip to Postgres regardless of stage count.</span> <strong class="perf-tradeoff-head">Tradeoff</strong> <span class="perf-tradeoff-detail">- slightly larger write transaction; lock time stays small, and <strong class="perf-gain-head">latency drops materially</strong>.</span></p>
 
