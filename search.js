@@ -480,14 +480,14 @@
     if (matches.length === 0) return;
     matchIndex = (matchIndex + 1) % matches.length;
     updateNavUi();
-    navigateToItem(matches[matchIndex], getSearchQuery(), { closeOverlay: true });
+    navigateToItem(matches[matchIndex], getSearchQuery(), { closeOverlay: false });
   }
 
   function goPrev() {
     if (matches.length === 0) return;
     matchIndex = (matchIndex - 1 + matches.length) % matches.length;
     updateNavUi();
-    navigateToItem(matches[matchIndex], getSearchQuery(), { closeOverlay: true });
+    navigateToItem(matches[matchIndex], getSearchQuery(), { closeOverlay: false });
   }
 
   function goCurrent() {
