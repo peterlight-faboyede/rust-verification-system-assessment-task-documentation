@@ -237,6 +237,14 @@
 
     <section id="workers-processor" class="doc-section">
       <h2>Stage processor worker</h2>
+      <div class="exec-stage-processor-rationale">
+        <p class="exec-stage-processor-rationale-lead"><strong>Firstly, why does the Stage Processor exist?</strong></p>
+        <p>The API’s job ends at <code>202 Accepted</code>. It validated the data, locked the stage to <code>PENDING</code>, and wrote the outbox event. The actual KYC work — calling third-party verification services, analyzing documents, matching faces — has not happened yet. Something has to do it.</p>
+        <p>That something cannot be the API. KYC checks are slow, unpredictable, and failure-prone. Doing them synchronously inside an HTTP request would mean <span class="doc-problem">the client waits minutes for a response</span>, <span class="doc-problem">the API’s connection pool gets exhausted holding long-running requests open</span>, and <span class="doc-problem">a single slow third-party service degrades the entire API for everyone else hitting it at the same time</span>.</p>
+        <p>So the work is decoupled entirely. The API signals intent by writing to the outbox. The Outbox Relay picks that up and pushes a message to RabbitMQ. The Stage Processor is the dedicated consumer of that queue — the process whose only job is to take that message, run the real verification work, write the result back to Postgres, and drive the stage chain forward.</p>
+        <p>It also owns the sequential unlock logic. When Stage 1 finishes, Stage 2 must start. There is no cron watching for that. The Stage Processor does it — in the same transaction that marks Stage 1 <code>COMPLETED</code>, it inserts Stage 2’s outbox event. The pipeline advances the instant the previous stage commits. No polling, no delay, no external scheduler.</p>
+        <p><span class="doc-problem">Without the Stage Processor, the system has no execution engine. The data sits in PENDING forever and nothing ever moves.</span></p>
+      </div>
       <h3>What it does and how it flows</h3>
       <p class="lead">The muscle of the engine.</p>
       <p>Consumes jobs from RabbitMQ, runs the verification logic, drives the stage chain forward, and handles every failure path without losing data.</p>
