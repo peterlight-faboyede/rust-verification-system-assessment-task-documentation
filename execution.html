@@ -45,6 +45,13 @@
   <main>
     <section id="api-execution" class="doc-section">
       <h2>API execution</h2>
+      <div class="exec-api-rationale">
+        <p class="exec-api-rationale-lead"><strong>Firstly, why does the verification engine need a controlled API entry point?</strong></p>
+        <p>The verification engine needs a controlled, secure entry point. Without one, <span class="doc-problem">clients have no way to interact with the system - there’s no way to start a session, submit data, or check progress.</span></p>
+        <p>But the API’s role is more specific than just &quot;accept requests.&quot; It exists to be the single point where untrusted external input is transformed into trusted internal state. Everything the API does is about that boundary - validating that the data is correct, authenticating that the caller is allowed, preventing duplicates, and writing the result into Postgres atomically. By the time data leaves the API layer, it has been fully vetted and safely persisted. The workers downstream can trust everything they receive from the database because the API already rejected anything that didn’t belong there.</p>
+        <p>It also exists to enforce the contract with clients. The workers don’t speak HTTP. They have no concept of a request or a response. The API translates between the HTTP world the client lives in and the async, queue-driven world the workers operate in. It accepts a synchronous HTTP call, does its work, and returns <code>202 Accepted</code> - explicitly telling the client &quot;your data is safe, but the result will come later.&quot; That translation is the API’s core purpose.</p>
+        <p><span class="doc-problem">Without it, there’s no authentication, no validation, no idempotency, no structured response contract, and no clean separation between what the client does and what the workers do.</span> The entire system’s reliability depends on the entry point being strict. The API is that strictness, codified.</p>
+      </div>
       <h3>The API layer - what it does and how it flows</h3>
       <p class="lead">The API is a gateway.</p>
       <p>It validates, locks data into Postgres, and hands off to workers.</p>
