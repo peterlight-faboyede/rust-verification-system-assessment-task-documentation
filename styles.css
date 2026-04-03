@@ -251,18 +251,12 @@ body.hub-home .hub-chapters-head {
 }
 
 body.hub-home .hub-chapters-head h2 {
-  margin: 0 0 0.35rem;
+  margin: 0;
   font-family: var(--font-display);
   font-size: 1.35rem;
   font-weight: 600;
   color: var(--text);
   letter-spacing: -0.015em;
-}
-
-body.hub-home .hub-chapters-count {
-  margin: 0;
-  font-size: 0.9rem;
-  color: var(--text-muted);
 }
 
 .hub-chapters a {
