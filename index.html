@@ -9,7 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;600&family=JetBrains+Mono:wght@400;500;600&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
-<body>
+<body class="hub-home">
   <nav class="chapter-nav" aria-label="Documentation sections">
     <ul>
       <li><a href="index.html">Home</a></li>
@@ -25,15 +25,18 @@
     </ul>
   </nav>
 
-  <header class="site-header">
+  <header class="hub-hero" role="banner">
+    <p class="hub-eyebrow">Rust verification system</p>
     <h1>Technical documentation</h1>
-    <p class="subtitle">Verification system: stack, architecture, runtime behavior, tuning, observability, testing, security, and delivery.</p>
+    <p class="hub-lead">Reference for the stack, architecture, how the system runs, tuning, observability, testing, security, and delivery.</p>
   </header>
 
-  <main class="hub-main">
-    <h2 class="page-header-title hub-title-spaced">Chapters</h2>
-    <p class="page-header-desc">Open a section below. Each chapter is a separate HTML file.</p>
-    <ol class="hub-chapters hub-chapters-numbered">
+  <main class="hub-main" id="main">
+    <div class="hub-chapters-head">
+      <h2 id="chapters-heading">Chapters</h2>
+      <p class="hub-chapters-count">9 topics - each opens as its own page</p>
+    </div>
+    <ol class="hub-chapters hub-chapters-numbered" aria-labelledby="chapters-heading">
       <li><a href="application-stack.html">Application stack<span class="hub-chapter-meta">Crates, runtime, data layer, validation, observability, security, API docs</span></a></li>
       <li><a href="architecture.html">Architecture<span class="hub-chapter-meta">Topology, API &amp; workers, contracts, folder layout, data model, messaging</span></a></li>
       <li><a href="execution.html">Execution<span class="hub-chapter-meta">API flow, workers, end-to-end phases, diagrams</span></a></li>
