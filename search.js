@@ -560,7 +560,7 @@
             <div class="doc-search-list" data-doc-search-list role="listbox" aria-label="Search results"></div>
           </div>
         </div>
-        <p class="doc-search-kbd-hint"><kbd>/</kbd> open · <kbd>Esc</kbd> close · arrows when focused in list</p>
+        <p class="doc-search-kbd-hint"><kbd>/</kbd> · <kbd>⌘F</kbd> / <kbd>Ctrl+F</kbd> open · <kbd>Esc</kbd> close · arrows in list</p>
       </div>
     `;
 
@@ -643,6 +643,13 @@
     if (e.key === "Escape" && overlayEl && !overlayEl.hidden) {
       e.preventDefault();
       closeOverlay();
+      return;
+    }
+    const wantsFind =
+      (e.key === "f" || e.key === "F") && (e.metaKey || e.ctrlKey) && !e.altKey;
+    if (wantsFind && !inField) {
+      e.preventDefault();
+      openOverlay(false);
       return;
     }
     if (e.key === "/" && !inField && !e.ctrlKey && !e.metaKey && !e.altKey) {
