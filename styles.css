@@ -18,7 +18,8 @@
   --font-mono: "JetBrains Mono", "Consolas", monospace;
   --shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
   --max-width: 920px;
-  --section-divider: color-mix(in srgb, var(--border) 88%, transparent);
+  --section-divider: color-mix(in srgb, var(--accent) 38%, var(--border));
+  --section-divider-glow: color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 *,
@@ -414,14 +415,15 @@ em.perf-note {
 main {
   max-width: var(--max-width);
   margin: 0 auto;
-  padding: 2rem 1.5rem 4rem;
+  padding: 2.5rem 1.5rem 4.5rem;
 }
 
 .doc-section {
   scroll-margin-top: 1rem;
-  padding-bottom: 3.25rem;
-  margin-bottom: 3.25rem;
-  border-bottom: 1px solid var(--section-divider);
+  padding-bottom: 4.25rem;
+  margin-bottom: 4.75rem;
+  border-bottom: 2px solid var(--section-divider);
+  box-shadow: 0 12px 40px -36px var(--section-divider-glow);
 }
 
 .doc-section:last-child {
@@ -434,7 +436,7 @@ main {
   font-family: var(--font-display);
   font-size: clamp(1.95rem, 3.5vw, 2.35rem);
   font-weight: 600;
-  margin: 0 0 1.5rem;
+  margin: 0 0 1.85rem;
   letter-spacing: -0.02em;
   color: var(--text);
   line-height: 1.18;
@@ -444,15 +446,15 @@ main {
   font-family: var(--font-display);
   font-size: clamp(1.4rem, 2.6vw, 1.58rem);
   font-weight: 600;
-  margin: 2.75rem 0 1rem;
-  padding-top: 2rem;
-  border-top: 1px solid var(--section-divider);
+  margin: 3.5rem 0 1.2rem;
+  padding-top: 2.65rem;
+  border-top: 2px solid var(--section-divider);
   color: var(--text);
   line-height: 1.28;
 }
 
 .doc-section h2 + h3 {
-  margin-top: 0.35rem;
+  margin-top: 0.5rem;
   padding-top: 0;
   border-top: none;
 }
@@ -460,13 +462,13 @@ main {
 .doc-section h4 {
   font-size: clamp(1.08rem, 1.9vw, 1.18rem);
   font-weight: 600;
-  margin: 1.65rem 0 0.65rem;
+  margin: 1.9rem 0 0.75rem;
   color: var(--warn);
   line-height: 1.32;
 }
 
 .doc-section p {
-  margin: 0 0 1.1rem;
+  margin: 0 0 1.2rem;
   color: var(--text-muted);
 }
 
