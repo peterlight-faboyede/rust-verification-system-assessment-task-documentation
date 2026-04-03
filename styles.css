@@ -292,6 +292,9 @@ body.hub-home .hub-chapters-head h2 {
 .exec-lease-recovery-rationale,
 .exec-stage-processor-rationale,
 .exec-api-rationale,
+.arch-messaging-rationale,
+.app-stack-tokio-rationale,
+.app-stack-axum-rationale,
 .perf-mechanism-rationale {
   background: color-mix(in srgb, var(--accent) 8%, var(--bg-elevated));
   border-left: 4px solid var(--accent);
@@ -305,6 +308,9 @@ body.hub-home .hub-chapters-head h2 {
 .exec-lease-recovery-rationale-lead,
 .exec-stage-processor-rationale-lead,
 .exec-api-rationale-lead,
+.arch-messaging-rationale-lead,
+.app-stack-tokio-rationale-lead,
+.app-stack-axum-rationale-lead,
 .perf-mechanism-rationale-lead {
   margin: 0 0 0.9rem;
   font-size: 1.05rem;
@@ -317,6 +323,9 @@ body.hub-home .hub-chapters-head h2 {
 .exec-lease-recovery-rationale-lead strong,
 .exec-stage-processor-rationale-lead strong,
 .exec-api-rationale-lead strong,
+.arch-messaging-rationale-lead strong,
+.app-stack-tokio-rationale-lead strong,
+.app-stack-axum-rationale-lead strong,
 .perf-mechanism-rationale-lead strong {
   font-weight: 600;
   color: var(--accent);
@@ -326,6 +335,9 @@ body.hub-home .hub-chapters-head h2 {
 .exec-lease-recovery-rationale > p,
 .exec-stage-processor-rationale > p,
 .exec-api-rationale > p,
+.arch-messaging-rationale > p,
+.app-stack-tokio-rationale > p,
+.app-stack-axum-rationale > p,
 .perf-mechanism-rationale > p {
   margin: 0 0 0.7rem;
   color: var(--text-muted);
@@ -336,6 +348,9 @@ body.hub-home .hub-chapters-head h2 {
 .exec-lease-recovery-rationale > p:last-child,
 .exec-stage-processor-rationale > p:last-child,
 .exec-api-rationale > p:last-child,
+.arch-messaging-rationale > p:last-child,
+.app-stack-tokio-rationale > p:last-child,
+.app-stack-axum-rationale > p:last-child,
 .perf-mechanism-rationale > p:last-child {
   margin-bottom: 0;
 }

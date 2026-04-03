@@ -526,6 +526,16 @@
 
     <section id="message-queue" class="doc-section">
       <h2>Message queue architecture</h2>
+      <div class="arch-messaging-rationale">
+        <p class="arch-messaging-rationale-lead"><strong>Firstly, why RabbitMQ instead of Redis?</strong></p>
+        <p><strong>RabbitMQ over Redis for messaging - why</strong></p>
+        <p><strong>Persistence.</strong> Messages are written to disk with delivery mode 2. A broker restart does not lose in-flight jobs. <span class="doc-problem">Redis pub/sub is fire-and-forget - if no subscriber is listening at that exact moment, the message is gone.</span></p>
+        <p><strong>Explicit acknowledgement.</strong> RabbitMQ holds a message until the consumer explicitly ACKs it. <span class="doc-problem">Redis has no concept of this - once delivered, it’s delivered.</span> Our entire at-least-once delivery guarantee depends on explicit ACK/NACK control.</p>
+        <p><strong>Dead-letter topology.</strong> The three-tier architecture - main queue, wait queue, terminal graveyard - is native RabbitMQ infrastructure. TTL-based retry routing back to the main queue is built into the broker. <span class="doc-problem">Replicating this in Redis requires custom application code for every failure scenario.</span></p>
+        <p><strong>Consumer group semantics.</strong> RabbitMQ distributes messages across competing consumers automatically with SKIP LOCKED-equivalent behavior at the broker level. Redis Streams can do this too, but <span class="doc-problem">it’s significantly more complex to operate correctly.</span></p>
+        <p><strong>Backpressure control.</strong> <code>basic_qos(prefetch=1)</code> tells the broker exactly how many unacknowledged messages to push to a consumer at once. <span class="doc-problem">Redis has no equivalent - the consumer controls its own polling rate, which pushes backpressure management entirely into application code.</span></p>
+        <p><strong>Operational visibility.</strong> The RabbitMQ management UI shows queue depths, consumer counts, message rates, and dead-letter contents in real time. Debugging a stuck job means opening a browser tab, not writing Redis commands.</p>
+      </div>
       <h3>Foundation: three tiers, one rule - no message is ever lost</h3>
       <figure class="diagram-showcase">
         <div class="diagram-frame">

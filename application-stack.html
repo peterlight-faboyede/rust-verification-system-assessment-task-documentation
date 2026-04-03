@@ -40,6 +40,8 @@
       <li><a href="#observability">Observability &amp; config</a></li>
       <li><a href="#security">Security &amp; reliability</a></li>
       <li><a href="#api-docs">API docs</a></li>
+      <li><a href="#tokio-runtime">Tokio runtime</a></li>
+      <li><a href="#axum-tower">Axum + Tower</a></li>
     </ul>
   </nav>
 
@@ -135,6 +137,27 @@
             <li><strong>Utoipa + utoipa-swagger-ui</strong> - OpenAPI spec generated at compile time, served as an interactive Swagger UI. Manual Swagger files drift; this keeps docs and code in sync automatically.</li>
           </ul>
         </article>
+      </div>
+    </section>
+
+    <section id="tokio-runtime" class="doc-section">
+      <h2>Tokio as the runtime - why</h2>
+      <div class="app-stack-tokio-rationale">
+        <p><strong>Async-first ecosystem alignment.</strong> Every library in this stack - <code>sqlx</code>, <code>lapin</code>, <code>redis</code>, <code>axum</code> - is built on Tokio. They share the same async primitives, the same executor, and the same task model. No bridging, no compatibility shims, no runtime conflicts.</p>
+        <p><strong>Non-blocking async I/O.</strong> Tokio multiplexes thousands of concurrent connections - database queries, RabbitMQ publishes, HTTP requests - across a small fixed thread pool. No thread-per-request model, no OS thread overhead. The workers and API can handle massive concurrency without proportional memory cost.</p>
+        <p><strong><code>select!</code> and <code>CancellationToken</code> for shutdown.</strong> Graceful shutdown across every worker loop is built around <code>tokio::select!</code> and <code>CancellationToken</code>. These are Tokio primitives - clean, composable, and cooperative with the async runtime rather than fighting it.</p>
+        <p><strong><code>JoinSet</code> for bounded concurrency.</strong> The Stage Processor runs multiple jobs concurrently inside a <code>JoinSet</code>. This gives structured concurrency - tasks are tracked, drained on shutdown, and never leak - <span class="doc-problem">which is not possible with raw <code>spawn</code> calls.</span></p>
+        <p><strong>Time control in tests.</strong> <code>tokio::time::pause()</code> and <code>tokio::time::advance()</code> let the Lease Recovery tests simulate a 60-second polling loop in milliseconds. No real waiting, no slow CI. This is only possible because Tokio owns the time abstraction inside the async runtime.</p>
+      </div>
+    </section>
+
+    <section id="axum-tower" class="doc-section">
+      <h2>Axum + Tower - why</h2>
+      <div class="app-stack-axum-rationale">
+        <p><strong>Native Tokio integration.</strong> Axum is built by the Tokio team and runs directly on Tokio’s runtime. No adapter layers, no compatibility shims - it shares the same async executor as every other dependency in the stack.</p>
+        <p><strong>Every route is a <code>tower::Service</code>.</strong> This means middleware - rate limiting, tracing, CORS, request IDs - is composed as standard Tower layers, completely outside business logic. The same middleware primitives work across the entire HTTP stack without framework-specific glue.</p>
+        <p><strong>Compile-time extractor safety.</strong> <code>FromRequest</code> and <code>FromRequestParts</code> enforce validation and authentication at the type level. A handler that requires <code>ValidatedJson&lt;T&gt;</code> or <code>ValidatedClient</code> literally cannot compile without those extractors being correctly wired. Errors are caught before the binary runs, not at request time.</p>
+        <p><strong>Zero framework overhead.</strong> Axum adds no reflection, no runtime magic, no macro-heavy annotation scanning. Routing is a pointer lookup. The abstraction cost is zero - raw Hyper performance with structured routing on top.</p>
       </div>
     </section>
   </main>
